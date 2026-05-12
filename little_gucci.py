@@ -4139,6 +4139,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         # Create or update widgets for each rig
         for rig in all_rigs:
             rig_name = rig['rig_name']
+            is_enabled = rig.get('enabled', 1) == 1
             is_connected = rig_name in connected
 
             if rig_name not in self.rig_status_widgets:
@@ -4162,7 +4163,13 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
 
             # Update status label
             _, label_status = self.rig_status_widgets[rig_name]
-            if is_connected:
+            if not is_enabled:
+                label_status.setText(" Disabled ")
+                label_status.setStyleSheet(
+                    "background-color: #888888; color: white;"
+                    " font-family: Roboto; font-size: 12px; font-weight: normal;"
+                )
+            elif is_connected:
                 label_status.setText(" Connected ")
                 label_status.setStyleSheet(
                     "background-color: #00dd00; color: black;"
