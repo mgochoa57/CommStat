@@ -25,6 +25,28 @@ _CONNECTOR_COLS = (
     "date_added, is_default, enabled"
 )
 
+# Why: under fd exhaustion (EMFILE) every DB call here fails identically, and
+# without throttling the log can hit thousands of lines/sec — CPU-burning noise
+# that obscures the real failure. Suppress duplicate messages; surface a
+# heartbeat every 100 repeats so the issue is still visible.
+_last_error_msg: Optional[str] = None
+_repeat_count: int = 0
+
+
+def _log_error_throttled(prefix: str, exc: Exception) -> None:
+    global _last_error_msg, _repeat_count
+    text = f"{prefix}: {exc}"
+    if text == _last_error_msg:
+        _repeat_count += 1
+        if _repeat_count % 100 == 0:
+            logger.error("%s (repeated %d times)", text, _repeat_count)
+        return
+    if _repeat_count > 0:
+        logger.error("(previous error repeated %d more time(s))", _repeat_count)
+    logger.error(text)
+    _last_error_msg = text
+    _repeat_count = 0
+
 
 class ConnectorManager:
     """Manages JS8Call TCP connector configuration in database."""
@@ -57,7 +79,7 @@ class ConnectorManager:
                 """)
                 conn.commit()
         except sqlite3.Error as e:
-            logger.error("Error initializing js8_connectors table: %s", e)
+            _log_error_throttled("Error initializing js8_connectors table", e)
 
     def get_all_connectors(self, enabled_only: bool = False) -> List[Dict]:
         """
@@ -87,7 +109,7 @@ class ConnectorManager:
                 rows = cursor.fetchall()
                 return [dict(row) for row in rows]
         except sqlite3.Error as e:
-            logger.error("Error getting connectors: %s", e)
+            _log_error_throttled("Error getting connectors", e)
             return []
 
     def get_connector_by_id(self, connector_id: int) -> Optional[Dict]:
@@ -111,7 +133,7 @@ class ConnectorManager:
                 row = cursor.fetchone()
                 return dict(row) if row else None
         except sqlite3.Error as e:
-            logger.error("Error getting connector by ID: %s", e)
+            _log_error_throttled("Error getting connector by ID", e)
             return None
 
     def get_connector_by_name(self, rig_name: str) -> Optional[Dict]:
@@ -135,7 +157,7 @@ class ConnectorManager:
                 row = cursor.fetchone()
                 return dict(row) if row else None
         except sqlite3.Error as e:
-            logger.error("Error getting connector by name: %s", e)
+            _log_error_throttled("Error getting connector by name", e)
             return None
 
     def get_default_connector(self) -> Optional[Dict]:
@@ -155,7 +177,7 @@ class ConnectorManager:
                 row = cursor.fetchone()
                 return dict(row) if row else None
         except sqlite3.Error as e:
-            logger.error("Error getting default connector: %s", e)
+            _log_error_throttled("Error getting default connector", e)
             return None
 
     def add_connector(
@@ -230,7 +252,7 @@ class ConnectorManager:
             logger.warning("Cannot add connector: rig name '%s' already exists", rig_name)
             return False
         except sqlite3.Error as e:
-            logger.error("Error adding connector: %s", e)
+            _log_error_throttled("Error adding connector", e)
             return False
 
     def update_connector(
@@ -296,7 +318,7 @@ class ConnectorManager:
             logger.warning("Cannot update: rig name '%s' already exists", rig_name)
             return False
         except sqlite3.Error as e:
-            logger.error("Error updating connector: %s", e)
+            _log_error_throttled("Error updating connector", e)
             return False
 
     def remove_connector(self, connector_id: int) -> bool:
@@ -347,7 +369,7 @@ class ConnectorManager:
                 return True
 
         except sqlite3.Error as e:
-            logger.error("Error removing connector: %s", e)
+            _log_error_throttled("Error removing connector", e)
             return False
 
     def set_default(self, connector_id: int) -> bool:
@@ -382,7 +404,7 @@ class ConnectorManager:
                     return False
 
         except sqlite3.Error as e:
-            logger.error("Error setting default connector: %s", e)
+            _log_error_throttled("Error setting default connector", e)
             return False
 
     def get_connector_count(self) -> int:
@@ -398,7 +420,7 @@ class ConnectorManager:
                 cursor.execute("SELECT COUNT(*) FROM js8_connectors")
                 return cursor.fetchone()[0]
         except sqlite3.Error as e:
-            logger.error("Error getting connector count: %s", e)
+            _log_error_throttled("Error getting connector count", e)
             return 0
 
     def has_connectors(self) -> bool:
@@ -439,7 +461,7 @@ class ConnectorManager:
                     return False
 
         except sqlite3.Error as e:
-            logger.error("Error setting connector enabled state: %s", e)
+            _log_error_throttled("Error setting connector enabled state", e)
             return False
 
     def is_enabled(self, connector_id: int) -> bool:

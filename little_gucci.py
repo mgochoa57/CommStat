@@ -113,9 +113,12 @@ def check_internet() -> bool:
     Returns:
         True if internet is available, False otherwise.
     """
+    # Why: this runs synchronously from __init__ before the UI paints, so a
+    # slow-DNS day blocked startup for up to 9s. 1s per probe keeps the
+    # worst case at 3s while still tolerating typical network latency.
     for host, port in (("www.google.com", 80), ("www.cloudflare.com", 443), ("8.8.8.8", 443)):
         try:
-            sock = socket.create_connection((host, port), timeout=3)
+            sock = socket.create_connection((host, port), timeout=1)
             sock.close()
             return True
         except (socket.timeout, socket.error):
@@ -501,10 +504,18 @@ def create_insecure_ssl_context():
 class TileSchemeHandler(QWebEngineUrlSchemeHandler):
     """Serves map tiles from tilesPNG2 via the tiles:// custom URL scheme."""
 
+    # Why: cap the in-flight buffer set so a missed `job.destroyed` signal
+    # (e.g. when the renderer crashes mid-load) can't grow the set without
+    # bound. 256 covers a full screen of tiles at our largest zoom with
+    # headroom. Oldest entries are evicted FIFO.
+    _MAX_LIVE_BUFS = 256
+
     def __init__(self, tile_dir: str, parent=None):
         super().__init__(parent)
         self._tile_dir = tile_dir
-        self._live_bufs: set = set()
+        # deque-as-FIFO so we can bound it; set lookups not needed.
+        from collections import deque
+        self._live_bufs: deque = deque(maxlen=self._MAX_LIVE_BUFS)
 
     def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
         path = job.requestUrl().path().lstrip('/')
@@ -516,8 +527,19 @@ class TileSchemeHandler(QWebEngineUrlSchemeHandler):
                 buf = QBuffer()
                 buf.setData(data)
                 buf.open(QIODevice.ReadOnly)
-                self._live_bufs.add(buf)
-                job.destroyed.connect(lambda: self._live_bufs.discard(buf))
+                # Hold a reference until the job is destroyed OR the buffer is
+                # closed, whichever fires first. The deque's maxlen evicts the
+                # oldest reference if neither signal arrives.
+                self._live_bufs.append(buf)
+
+                def _drop(*_):
+                    try:
+                        self._live_bufs.remove(buf)
+                    except ValueError:
+                        pass
+
+                job.destroyed.connect(_drop)
+                buf.aboutToClose.connect(_drop)
                 job.reply(b'image/png', buf)
             except Exception:
                 job.fail(QWebEngineUrlRequestJob.RequestFailed)
@@ -538,6 +560,9 @@ class LargeMapDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("CommStat — Map")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        # Why: without this, closing the dialog only hides it — the
+        # QWebEngineView and its renderer subprocess stay alive holding shm fds.
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.resize(800, 450)
         if os.path.exists("radiation-32.png"):
             self.setWindowIcon(QtGui.QIcon("radiation-32.png"))
@@ -565,6 +590,17 @@ class LargeMapDialog(QtWidgets.QDialog):
 
     def update_map(self, html: str) -> None:
         self.map_view.setHtml(html, QUrl("http://localhost/"))
+
+    def closeEvent(self, event):
+        # Tear down the QWebEngineView so the Chromium renderer subprocess and
+        # its shm fds are released. Without this, repeated open/close of the
+        # large-map window leaks renderer resources until EMFILE.
+        try:
+            self.map_view.setPage(None)
+            self.map_view.deleteLater()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 # =============================================================================
@@ -3764,8 +3800,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         map_html = map_data.getvalue().decode()
 
-        # Convert circle marker popups from click-to-open to hover-to-open.
-        # Leaflet keeps popups open after mouseover so the Details link remains clickable.
+        # Circle marker popups open on click and auto-close after 3 seconds.
         hover_js = """<script>
 window.addEventListener('load', function() {
     setTimeout(function() {
@@ -3774,30 +3809,17 @@ window.addEventListener('load', function() {
             if (obj && obj._leaflet_id && obj.eachLayer) {
                 obj.eachLayer(function(layer) {
                     if (layer.getPopup && layer.getPopup()) {
-                        layer.off('click');
                         layer._popupCloseTimer = null;
-                        var scheduleClose = function() {
+                        layer.on('popupopen', function(e) {
                             if (layer._popupCloseTimer) clearTimeout(layer._popupCloseTimer);
                             layer._popupCloseTimer = setTimeout(function() {
                                 layer.closePopup();
                             }, 3000);
-                        };
-                        var cancelClose = function() {
+                        });
+                        layer.on('popupclose', function(e) {
                             if (layer._popupCloseTimer) {
                                 clearTimeout(layer._popupCloseTimer);
                                 layer._popupCloseTimer = null;
-                            }
-                        };
-                        layer.on('mouseover', function() {
-                            cancelClose();
-                            this.openPopup();
-                        });
-                        layer.on('mouseout', scheduleClose);
-                        layer.on('popupopen', function(e) {
-                            var el = e.popup.getElement();
-                            if (el) {
-                                el.addEventListener('mouseenter', cancelClose);
-                                el.addEventListener('mouseleave', scheduleClose);
                             }
                         });
                     }
@@ -4058,10 +4080,11 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         # state. Why: the indicators are otherwise event-driven via
         # any_connection_changed; if a signal is missed (e.g. socket transitions
         # without `disconnected` firing) the indicators drift out of sync with
-        # the JS8 Connectors dialog. A 2s poll keeps them self-correcting.
+        # the JS8 Connectors dialog. A 5s poll keeps them self-correcting
+        # without churning sqlite during degraded states.
         self.rig_status_timer = QTimer(self)
         self.rig_status_timer.timeout.connect(self._update_connected_rigs_display)
-        self.rig_status_timer.start(2000)
+        self.rig_status_timer.start(5000)
 
         # Internet check timer - retries every 30 minutes if offline
         self.internet_timer = QTimer(self)
@@ -4470,6 +4493,11 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             return
         html = getattr(self, '_last_map_html', '')
         self._large_map_dlg = LargeMapDialog(html, main_window=self, parent=self)
+        # Drop our reference when the dialog is destroyed so a stale handle
+        # doesn't keep the QWebEngineView (and its renderer) alive.
+        self._large_map_dlg.destroyed.connect(
+            lambda *_: setattr(self, '_large_map_dlg', None)
+        )
         self._large_map_dlg.show()
 
     def _trigger_show_alerts(self) -> None:
