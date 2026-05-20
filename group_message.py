@@ -341,6 +341,18 @@ class GroupMessageDialog(QDialog):
         if not self.tcp_pool:
             return
 
+        for cn in self.tcp_pool.get_all_rig_names():
+            c = self.tcp_pool.get_client(cn)
+            if c:
+                for sig, slot in [
+                    (c.callsign_received, self._on_callsign_received),
+                    (c.frequency_received, self._on_frequency_received),
+                ]:
+                    try:
+                        sig.disconnect(slot)
+                    except (TypeError, RuntimeError):
+                        pass
+
         client = self.tcp_pool.get_client(rig_name)
         if client and client.is_connected():
             speed_name = (client.speed_name or "").upper()
@@ -352,15 +364,6 @@ class GroupMessageDialog(QDialog):
 
             frequency = client.frequency
             self.freq_field.setText(f"{frequency:.3f}" if frequency else "")
-
-            try:
-                client.callsign_received.disconnect(self._on_callsign_received)
-            except TypeError:
-                pass
-            try:
-                client.frequency_received.disconnect(self._on_frequency_received)
-            except TypeError:
-                pass
 
             client.callsign_received.connect(self._on_callsign_received)
             client.frequency_received.connect(self._on_frequency_received)
@@ -507,8 +510,7 @@ class GroupMessageDialog(QDialog):
         date_only    = now.toUTC().toString("yyyy-MM-dd")
         source = 3 if self.rig_combo.currentText() == INTERNET_RIG else 1
 
-        conn = sqlite3.connect(DATABASE_FILE)
-        try:
+        with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO messages "
                 "(datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
@@ -518,8 +520,6 @@ class GroupMessageDialog(QDialog):
                  "@" + self.group_combo.currentText(), message)
             )
             conn.commit()
-        finally:
-            conn.close()
 
         if frequency > 0 and self.delivery_combo.currentText() != "Limited Reach":
             group        = "@" + self.group_combo.currentText()

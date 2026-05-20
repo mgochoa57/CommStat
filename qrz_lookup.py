@@ -1709,9 +1709,10 @@ class StatRepDetailDialog(QDialog):
                 local_cs = _get_local_callsign()
                 url = (f"{self._backbone_url}/statrep-delete-808585.php"
                        f"?cs={urllib.parse.quote(local_cs)}&id={self._global_id}")
-                urllib.request.urlopen(url, timeout=10).close()
-            except Exception:
-                pass
+                with urllib.request.urlopen(url, timeout=10):
+                    pass
+            except Exception as e:
+                print(f"[StatRepDetailDialog] Delete request failed: {e}")
         deleted_id = self._record_id
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:

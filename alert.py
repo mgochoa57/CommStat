@@ -366,6 +366,14 @@ class AlertDialog(QDialog):
         if not self.tcp_pool:
             return
 
+        for cn in self.tcp_pool.get_all_rig_names():
+            c = self.tcp_pool.get_client(cn)
+            if c:
+                try:
+                    c.callsign_received.disconnect(self._on_callsign_received)
+                except (TypeError, RuntimeError):
+                    pass
+
         client = self.tcp_pool.get_client(rig_name)
         if client and client.is_connected():
             speed_name = (client.speed_name or "").upper()
@@ -378,10 +386,6 @@ class AlertDialog(QDialog):
             frequency = client.frequency
             self.freq_field.setText(f"{frequency:.3f}" if frequency else "")
 
-            try:
-                client.callsign_received.disconnect(self._on_callsign_received)
-            except TypeError:
-                pass
             client.callsign_received.connect(self._on_callsign_received)
             client.get_callsign()
         else:
@@ -546,10 +550,8 @@ class AlertDialog(QDialog):
         target       = self._get_target()
         source       = 3 if self.rig_combo.currentText() == INTERNET_RIG else 1
 
-        conn = sqlite3.connect(DATABASE_FILE)
-        try:
-            cur = conn.cursor()
-            cur.execute(
+        with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+            conn.execute(
                 "INSERT INTO alerts "
                 "(datetime, date, freq, db, source, alert_id, from_callsign, target, color, title, message) "
                 "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -557,8 +559,6 @@ class AlertDialog(QDialog):
                  callsign, target, color, title, message)
             )
             conn.commit()
-        finally:
-            conn.close()
 
         if frequency > 0:
             if self.delivery_combo.currentText() != "Limited Reach":

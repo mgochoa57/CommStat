@@ -2850,15 +2850,14 @@ class MainWindow(QtWidgets.QMainWindow):
             build_number = 500  # Default fallback
             data_id = 0  # Default fallback
             try:
-                conn = sqlite3.connect(DATABASE_FILE, timeout=10)
-                cursor = conn.cursor()
-                cursor.execute("SELECT db_version, build_number, data_id FROM controls WHERE id = 1")
-                result = cursor.fetchone()
-                if result:
-                    db_version = result[0]
-                    build_number = result[1] if len(result) > 1 else 500
-                    data_id = result[2] if len(result) > 2 else 0
-                conn.close()
+                with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT db_version, build_number, data_id FROM controls WHERE id = 1")
+                    result = cursor.fetchone()
+                    if result:
+                        db_version = result[0]
+                        build_number = result[1] if len(result) > 1 else 500
+                        data_id = result[2] if len(result) > 2 else 0
             except sqlite3.Error:
                 pass  # Use default values if query fails
 
@@ -2933,26 +2932,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
 
             # Execute SQL statements
-            conn = sqlite3.connect(DATABASE_FILE, timeout=10)
-            cursor = conn.cursor()
-
             try:
-                for sql in sql_statements:
-                    cursor.execute(sql)
-
-                # Update db_version in controls table
-                cursor.execute("UPDATE controls SET db_version = ? WHERE id = 1", (new_db_version,))
-                conn.commit()
+                with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                    cursor = conn.cursor()
+                    for sql in sql_statements:
+                        cursor.execute(sql)
+                    cursor.execute("UPDATE controls SET db_version = ? WHERE id = 1", (new_db_version,))
+                    conn.commit()
                 print(f"Database updated successfully to version {new_db_version}")
-
                 return True
-
             except sqlite3.Error as e:
-                conn.rollback()
                 print(f"Database update failed: {e}")
                 return False
-            finally:
-                conn.close()
 
         except Exception as e:
             print(f"Error handling db_update: {e}")
@@ -3017,11 +3008,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 # Update build_number in database
                 try:
-                    conn = sqlite3.connect(DATABASE_FILE, timeout=10)
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE controls SET build_number = ? WHERE id = 1", (new_build,))
-                    conn.commit()
-                    conn.close()
+                    with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                        conn.execute("UPDATE controls SET build_number = ? WHERE id = 1", (new_build,))
+                        conn.commit()
                     print(f"Build number updated to {new_build} in database")
                 except sqlite3.Error as e:
                     print(f"Warning: Failed to update build number in database: {e}")
@@ -3178,42 +3167,34 @@ class MainWindow(QtWidgets.QMainWindow):
         Returns:
             msg_type on success, empty string on failure
         """
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(["?" for _ in data])
+        query = f"INSERT INTO {table} ({columns}) VALUES({placeholders})"
         try:
-            conn = sqlite3.connect(DATABASE_FILE, timeout=10)
-            cursor = conn.cursor()
-
-            # Build INSERT statement
-            columns = ", ".join(data.keys())
-            placeholders = ", ".join(["?" for _ in data])
-            query = f"INSERT INTO {table} ({columns}) VALUES({placeholders})"
-
-            cursor.execute(query, tuple(data.values()))
-            conn.commit()
-
+            with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                conn.execute(query, tuple(data.values()))
+                conn.commit()
             print(f"{ConsoleColors.SUCCESS}[{rig_name}] Added {msg_type.upper()}{extra_info} from: {from_callsign}{ConsoleColors.RESET}")
-            conn.close()
             return msg_type
-
         except sqlite3.IntegrityError as e:
             if id_field in str(e) or "UNIQUE" in str(e):
                 id_val = data.get(id_field, "unknown")
-                # Backfill global_id if backbone returned a real ID for a locally-stored record (global_id=0)
                 incoming_global_id = data.get('global_id', 0)
                 print(f"[{rig_name}] Skipping {msg_type} from {from_callsign} — already received (Global ID: {incoming_global_id})")
                 if incoming_global_id:
-                    cursor.execute(
-                        f"UPDATE {table} SET global_id = ? WHERE {id_field} = ? AND (global_id IS NULL OR global_id = 0)",
-                        (incoming_global_id, id_val)
-                    )
-                    conn.commit()
+                    try:
+                        with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                            conn.execute(
+                                f"UPDATE {table} SET global_id = ? WHERE {id_field} = ? AND (global_id IS NULL OR global_id = 0)",
+                                (incoming_global_id, id_val)
+                            )
+                            conn.commit()
+                    except sqlite3.Error:
+                        pass
             else:
                 print(f"{ConsoleColors.WARNING}[{rig_name}] WARNING: Database constraint violation: {e}{ConsoleColors.RESET}")
         except sqlite3.Error as e:
             print(f"{ConsoleColors.ERROR}[{rig_name}] ERROR: {msg_type.capitalize()} database insert failed for {from_callsign}: {e}{ConsoleColors.RESET}")
-        finally:
-            if 'conn' in locals():
-                conn.close()
-
         return ""
 
     def _process_fcode_statrep(
@@ -3388,11 +3369,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         None
                     )
                     try:
-                        conn = sqlite3.connect(DATABASE_FILE, timeout=10)
-                        cursor = conn.cursor()
-                        cursor.execute("UPDATE controls SET data_id = ? WHERE id = 1", (data_id,))
-                        conn.commit()
-                        conn.close()
+                        with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                            conn.execute("UPDATE controls SET data_id = ? WHERE id = 1", (data_id,))
+                            conn.commit()
                         print(f"Updated data_id to {data_id} in controls table (delete)")
                     except sqlite3.Error as e:
                         print(f"Warning: Failed to update data_id in controls table (delete): {e}")
@@ -3462,11 +3441,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # Update data_id in controls table if we processed any messages
             if last_data_id > 0:
                 try:
-                    conn = sqlite3.connect(DATABASE_FILE, timeout=10)
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE controls SET data_id = ? WHERE id = 1", (last_data_id,))
-                    conn.commit()
-                    conn.close()
+                    with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                        conn.execute("UPDATE controls SET data_id = ? WHERE id = 1", (last_data_id,))
+                        conn.commit()
                     print(f"Updated data_id to {last_data_id} in controls table")
                 except sqlite3.Error as e:
                     print(f"Warning: Failed to update data_id in controls table: {e}")
