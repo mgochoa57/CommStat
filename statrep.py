@@ -125,11 +125,9 @@ def make_uppercase(field):
     def to_upper(text):
         if text != text.upper():
             pos = field.cursorPosition()
-            field.blockSignals(True)
             field.setText(text.upper())
-            field.blockSignals(False)
             field.setCursorPosition(pos)
-    field.textChanged.connect(to_upper)
+    field.textEdited.connect(to_upper)
 
 
 def get_state_from_connector(connector_manager, rig_name: str) -> str:

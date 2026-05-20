@@ -264,6 +264,21 @@ class JS8MailDialog(QDialog):
         if current_text and "(disconnected)" not in current_text:
             self._on_rig_changed(current_text)
 
+    def closeEvent(self, event) -> None:
+        if self.tcp_pool:
+            for rig_name in self.tcp_pool.get_all_rig_names():
+                client = self.tcp_pool.get_client(rig_name)
+                if client:
+                    for sig, slot in [
+                        (client.frequency_received, self._on_frequency_received),
+                        (client.call_selected_received, self._on_call_selected_for_transmit),
+                    ]:
+                        try:
+                            sig.disconnect(slot)
+                        except (TypeError, RuntimeError):
+                            pass
+        super().closeEvent(event)
+
     def _on_rig_changed(self, rig_name: str) -> None:
         """Handle rig selection change — update mode/frequency display."""
         if not rig_name or "(disconnected)" in rig_name:

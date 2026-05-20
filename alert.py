@@ -87,11 +87,9 @@ def make_uppercase(field: QLineEdit) -> None:
     def to_upper(text):
         if text != text.upper():
             pos = field.cursorPosition()
-            field.blockSignals(True)
             field.setText(text.upper())
-            field.blockSignals(False)
             field.setCursorPosition(pos)
-    field.textChanged.connect(to_upper)
+    field.textEdited.connect(to_upper)
 
 
 # =============================================================================
@@ -327,6 +325,21 @@ class AlertDialog(QDialog):
         current = self.rig_combo.currentText()
         if current:
             self._on_rig_changed(current)
+
+    def closeEvent(self, event) -> None:
+        if self.tcp_pool:
+            for rig_name in self.tcp_pool.get_all_rig_names():
+                client = self.tcp_pool.get_client(rig_name)
+                if client:
+                    for sig, slot in [
+                        (client.callsign_received, self._on_callsign_received),
+                        (client.frequency_received, self._on_frequency_for_transmit),
+                    ]:
+                        try:
+                            sig.disconnect(slot)
+                        except (TypeError, RuntimeError):
+                            pass
+        super().closeEvent(event)
 
     def _on_rig_changed(self, rig_name: str) -> None:
         if not rig_name or "(disconnected)" in rig_name:
