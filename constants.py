@@ -26,7 +26,7 @@ DATABASE_FILE = "traffic.db3"
 # =============================================================================
 
 # Timing
-HEARTBEAT_DELAY_MS  = 15000  # initial delay before first backbone heartbeat
+HEARTBEAT_DELAY_MS  = 5000   # initial delay before first backbone heartbeat
 RIG_FETCH_DELAY_MS  = 100    # staggered delay for grid/callsign requests after rig select
 RIG_FREQ_DELAY_MS   = 200    # staggered delay for frequency request after rig select
 

@@ -2216,6 +2216,20 @@ class DeliveryConfirmationDialog(QDialog):
     _PHOTO_MAX_W = 440      # cap photo width — wide banners shrink in height to fit
     _PHOTO_DEFAULT_W = 460  # column-2 budget at default dialog width; grow only if exceeded
 
+    # Subclasses override these to repurpose the dialog for related states.
+    _WINDOW_TITLE       = "Delivery Confirmation"
+    _BANNER_TEXT        = "Delivery Confirmation"
+    _BANNER_BG_OVERRIDE: Optional[str] = None   # None → use program_background
+    _BANNER_FG_OVERRIDE: Optional[str] = None
+    _FOOTER_TEXT        = "This Message Was Delivered Successfully"
+    _FOOTER_COLOR_OVERRIDE: Optional[str] = None  # None → module_foreground
+    _FOOTER_AS_BANNER   = False                   # True → render footer with banner font/size (program colors by default)
+    _FOOTER_BANNER_BG_OVERRIDE: Optional[str] = None  # When _FOOTER_AS_BANNER: override bg (use "transparent" for no fill)
+    _FOOTER_BANNER_FG_OVERRIDE: Optional[str] = None  # When _FOOTER_AS_BANNER: override text color
+    _MSG_BG_OVERRIDE: Optional[str] = None        # Message box background — None → #e9ecef
+    _MSG_FG_OVERRIDE: Optional[str] = None        # Message box text color — None → #333333
+    _MSG_BOLD           = False                   # When True, message text rendered bold
+
     def __init__(self, callsign: str, message: str,
                  module_background: str = "#f5f5f5",
                  module_foreground: str = "#333333",
@@ -2223,7 +2237,7 @@ class DeliveryConfirmationDialog(QDialog):
                  program_foreground: str = "",
                  parent=None):
         super().__init__(parent)
-        apply_standard_dialog_chrome(self, "Delivery Confirmation")
+        apply_standard_dialog_chrome(self, self._WINDOW_TITLE)
         self.setModal(True)
         self.resize(510, 440)
         self.setMinimumSize(510, 440)
@@ -2240,24 +2254,29 @@ class DeliveryConfirmationDialog(QDialog):
         self._populate_qrz()
 
     def _setup_ui(self) -> None:
+        msg_bg = self._MSG_BG_OVERRIDE or "#e9ecef"
+        msg_fg = self._MSG_FG_OVERRIDE or "#333333"
+        msg_weight = "font-weight:bold;" if self._MSG_BOLD else ""
         self.setStyleSheet(
             f"QDialog {{ background-color:{self._module_bg}; }}"
             f"QLabel {{ color:{self._module_fg}; background-color: transparent; font-size: 13px; }}"
-            f"QPlainTextEdit {{ background-color:#e9ecef; color:#333333;"
+            f"QPlainTextEdit {{ background-color:{msg_bg}; color:{msg_fg};"
             f" border:1px solid {COLOR_INPUT_BORDER}; border-radius:4px; padding:4px 8px;"
-            f" font-family:'Kode Mono', monospace; font-size:13px; }}"
+            f" font-family:'Kode Mono', monospace; font-size:13px; {msg_weight} }}"
         )
 
         main = QVBoxLayout(self)
         main.setContentsMargins(15, 15, 15, 15)
         main.setSpacing(10)
 
-        # Title bar (program colors)
-        title = QLabel("Delivery Confirmation")
+        # Title bar (program colors, or override for special-state subclasses)
+        banner_bg = self._BANNER_BG_OVERRIDE or self._program_bg
+        banner_fg = self._BANNER_FG_OVERRIDE or self._program_fg
+        title = QLabel(self._BANNER_TEXT)
         title.setAlignment(Qt.AlignCenter)
         title.setFont(QFont("Roboto Slab", -1, QFont.Black))
         title.setStyleSheet(
-            f"QLabel {{ background-color: {self._program_bg}; color: {self._program_fg};"
+            f"QLabel {{ background-color: {banner_bg}; color: {banner_fg};"
             " font-size: 16px; padding-top: 9px; padding-bottom: 9px; }"
         )
         main.addWidget(title)
@@ -2311,13 +2330,23 @@ class DeliveryConfirmationDialog(QDialog):
         self.msg_view.setFixedHeight(_fm.lineSpacing() * 4 + 14 + 40)
         main.addWidget(self.msg_view)
 
-        confirm_lbl = QLabel("This Message Was Delivered Successfully")
+        confirm_lbl = QLabel(self._FOOTER_TEXT)
         confirm_lbl.setAlignment(Qt.AlignCenter)
-        confirm_lbl.setFont(QFont("Roboto", -1, QFont.Bold))
-        confirm_lbl.setStyleSheet(
-            f"QLabel {{ color:{self._module_fg}; background-color: transparent;"
-            " font-family:Roboto, sans-serif; font-size:13px; font-weight:bold; padding-top:6px; }}"
-        )
+        if self._FOOTER_AS_BANNER:
+            footer_banner_bg = self._FOOTER_BANNER_BG_OVERRIDE or banner_bg
+            footer_banner_fg = self._FOOTER_BANNER_FG_OVERRIDE or banner_fg
+            confirm_lbl.setFont(QFont("Roboto Slab", -1, QFont.Black))
+            confirm_lbl.setStyleSheet(
+                f"QLabel {{ background-color: {footer_banner_bg}; color: {footer_banner_fg};"
+                " font-size: 16px; padding-top: 9px; padding-bottom: 9px; }"
+            )
+        else:
+            footer_color = self._FOOTER_COLOR_OVERRIDE or self._module_fg
+            confirm_lbl.setFont(QFont("Roboto", -1, QFont.Bold))
+            confirm_lbl.setStyleSheet(
+                f"QLabel {{ color:{footer_color}; background-color: transparent;"
+                " font-family:Roboto, sans-serif; font-size:13px; font-weight:bold; padding-top:6px; }}"
+            )
         main.addWidget(confirm_lbl)
         main.addStretch()
 
@@ -2448,3 +2477,21 @@ class DeliveryConfirmationDialog(QDialog):
         if avail > 0 and img_width > avail:
             deficit = img_width - avail
             self.resize(self.width() + deficit + 4, self.height())
+
+
+# ── Dialog: Message Expired popup (backbone ::EXPIRED::) ──────────────────
+
+class MessageExpiredDialog(DeliveryConfirmationDialog):
+    """Variant of DeliveryConfirmationDialog shown when a message's delivery
+    window expires before the recipient retrieves it.
+
+    Uses program-colored banners top and bottom — the wording itself ("This
+    Message Was Not Delivered" / "Recipient Did not retrieve it") signals
+    non-delivery and keeps the popup visually distinct from the delivered
+    dialog (which has a small text footer, not a banner).
+    """
+
+    _WINDOW_TITLE     = "Message Expired"
+    _BANNER_TEXT      = "This Message Was Not Delivered"
+    _FOOTER_TEXT      = "Recipient Did Not Retrieve It"
+    _FOOTER_AS_BANNER = True

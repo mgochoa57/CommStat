@@ -2034,7 +2034,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Internet just became available
             print("Internet connectivity: Now available")
             self.internet_timer.stop()
-            # Send first heartbeat after 15 second delay, then start timer
+            # Send first heartbeat after the HEARTBEAT_DELAY_MS delay, then start timer
             def start_backbone_heartbeat():
                 self._check_backbone()  # Send first heartbeat immediately
                 self.backbone_timer.start(180000)  # Then start 3 minute interval timer
@@ -2137,7 +2137,7 @@ class MainWindow(QtWidgets.QMainWindow):
         internet_lbl.setEnabled(False)
         self.transmit_menu.addAction(internet_lbl)
 
-        inet_msg_action = QtWidgets.QAction("Internet Message", self)
+        inet_msg_action = QtWidgets.QAction("Direct Message", self)
         inet_msg_action.triggered.connect(self._on_qrz_lookup)
         self.transmit_menu.addAction(inet_msg_action)
         self.actions["internet_message"] = inet_msg_action
@@ -3343,23 +3343,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not line:
                     continue
 
-                # Catch ::DELIVERED:: lines regardless of whether they carry an ID prefix
+                # Catch ::DELIVERED:: / ::EXPIRED:: lines regardless of whether they carry an ID prefix
+                _directive_slot = None
                 if "::DELIVERED::" in line:
-                    print(f"[BACKBONE] ::DELIVERED:: raw line: {line!r}")
+                    _directive_slot = ("::DELIVERED::", "_show_delivered_popup", "Delivered")
+                elif "::EXPIRED::" in line:
+                    _directive_slot = ("::EXPIRED::", "_show_expired_popup", "Expired")
+                if _directive_slot is not None:
+                    _tag, _slot, _label = _directive_slot
+                    print(f"[BACKBONE] {_tag} raw line: {line!r}")
                     # Strip optional leading ID prefix before the directive
                     raw_payload = re.sub(r'^\d+:\s*', '', line)
-                    raw_payload = raw_payload[len("::DELIVERED::"):]
+                    raw_payload = raw_payload[len(_tag):]
                     if "," in raw_payload:
                         callsign, msg_text = raw_payload.split(",", 1)
-                        print(f"[BACKBONE] Delivered — callsign={callsign.strip()!r}  msg={msg_text.strip()!r}")
+                        print(f"[BACKBONE] {_label} — callsign={callsign.strip()!r}  msg={msg_text.strip()!r}")
                         QtCore.QMetaObject.invokeMethod(
-                            self, "_show_delivered_popup",
+                            self, _slot,
                             QtCore.Qt.QueuedConnection,
                             QtCore.Q_ARG(str, callsign.strip()),
                             QtCore.Q_ARG(str, msg_text.strip())
                         )
                     else:
-                        print(f"[BACKBONE] ::DELIVERED:: payload missing comma, skipping: {raw_payload!r}")
+                        print(f"[BACKBONE] {_tag} payload missing comma, skipping: {raw_payload!r}")
                     continue
 
                 # Check if line starts with a number followed by colon
@@ -3487,6 +3493,22 @@ class MainWindow(QtWidgets.QMainWindow):
         print(f"[DELIVERED] Showing popup — callsign={callsign!r}  message={message!r}")
         from qrz_lookup import DeliveryConfirmationDialog
         dlg = DeliveryConfirmationDialog(
+            callsign=callsign,
+            message=message,
+            module_background=self.config.get_color('module_background'),
+            module_foreground=self.config.get_color('module_foreground'),
+            program_background=self.config.get_color('program_background'),
+            program_foreground=self.config.get_color('program_foreground'),
+            parent=self,
+        )
+        dlg.exec_()
+
+    @QtCore.pyqtSlot(str, str)
+    def _show_expired_popup(self, callsign: str, message: str) -> None:
+        """Show an expiry popup when the backbone reports a message expired before retrieval."""
+        print(f"[EXPIRED] Showing popup — callsign={callsign!r}  message={message!r}")
+        from qrz_lookup import MessageExpiredDialog
+        dlg = MessageExpiredDialog(
             callsign=callsign,
             message=message,
             module_background=self.config.get_color('module_background'),
@@ -3636,10 +3658,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if "::DELIVERED::" in content_stripped:
                 print(f"[BACKBONE] ::DELIVERED:: detected in content: {content_stripped!r}")
+            if "::EXPIRED::" in content_stripped:
+                print(f"[BACKBONE] ::EXPIRED:: detected in content: {content_stripped!r}")
 
             if (re.search(r'^\d+:\s+\d{4}-\d{2}-\d{2}', content_stripped, re.MULTILINE) or
                     re.search(r'^\d+:\s+::STATREP-DELETE::', content_stripped, re.MULTILINE) or
-                    re.search(r'::DELIVERED::', content_stripped)):
+                    re.search(r'::DELIVERED::', content_stripped) or
+                    re.search(r'::EXPIRED::', content_stripped)):
                 self._handle_backbone_data_messages(content_stripped)
 
         except Exception as e:
@@ -4437,7 +4462,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         self.backbone_timer = QTimer(self)
         self.backbone_timer.timeout.connect(self._check_backbone)
         if self._internet_available:
-            # Delay first heartbeat by 15 seconds, then start timer for subsequent heartbeats
+            # Delay first heartbeat by HEARTBEAT_DELAY_MS, then start timer for subsequent heartbeats
             def start_backbone_heartbeat():
                 self._check_backbone()  # Send first heartbeat immediately
                 self.backbone_timer.start(180000)  # Then start 3 minute interval timer
