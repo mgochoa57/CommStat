@@ -188,7 +188,7 @@ class JS8SMSDialog(QDialog):
 
         optin = QtWidgets.QLabel(
             'To opt in, the recipient must register their phone number at '
-            '<a href="https://smsgte.org/opt-in/">https://smsgte.org/opt-in/</a>.'
+            '<a href="https://aprs.wiki/">https://aprs.wiki/</a>.'
         )
         optin.setOpenExternalLinks(True)
         optin.setWordWrap(True)
