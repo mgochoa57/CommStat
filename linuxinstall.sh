@@ -20,9 +20,9 @@ if ! command -v apt &> /dev/null; then
     echo "Error: apt package manager not found."
     echo "This script is for Debian/Ubuntu-based systems."
     echo ""
-    echo "For other distros, manually install PyQt5 WebEngine:"
-    echo "  Fedora: sudo dnf install python3-qt5-webengine"
-    echo "  Arch:   sudo pacman -S python-pyqt5-webengine"
+    echo "For other distros, manually install PyQt5 WebEngine and Multimedia:"
+    echo "  Fedora: sudo dnf install python3-qt5-webengine qt5-qtmultimedia"
+    echo "  Arch:   sudo pacman -S python-pyqt5-webengine qt5-multimedia"
     echo "Then run: python3 install.py"
     exit 1
 fi
@@ -39,7 +39,7 @@ echo "(You may be prompted for your sudo password)"
 echo ""
 
 sudo apt update
-sudo apt install -y python3-pyqt5 python3-pyqt5.qtwebengine libenchant-2-dev python3-tk
+sudo apt install -y python3-pyqt5 python3-pyqt5.qtwebengine python3-pyqt5.qtmultimedia libqt5multimedia5-plugins libenchant-2-dev python3-tk
 
 echo ""
 echo "Running Python installer..."
