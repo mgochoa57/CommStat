@@ -165,6 +165,12 @@ class SoundSettingsDialog(QDialog):
 
             # Column 2 — Sound file combo
             combo = QComboBox()
+            combo.setStyleSheet(
+                "QComboBox { background-color:#FFFFFF; color:#000000;"
+                " border:1px solid #cccccc; border-radius:4px; padding:2px 4px; }"
+                f"QComboBox QAbstractItemView {{ background-color:{_PANEL_BG}; color:#000000;"
+                " selection-background-color:#cce5ff; selection-color:#000000; }"
+            )
             combo.setFont(mono_font())
             combo.addItems(wav_files)
             current = self.config.get_sound_file(event)
