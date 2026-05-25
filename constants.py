@@ -13,7 +13,7 @@ from typing import Dict
 # Application Identity
 # =============================================================================
 
-VERSION = "4.2.3"
+VERSION = "4.2.4"
 
 WINDOW_TITLE = f"CommStat (v{VERSION}) by N0DDK"
 WINDOW_SIZE = (1360, 768)
@@ -27,7 +27,7 @@ SOUNDS_DIR = "sounds"
 # =============================================================================
 
 # Timing
-HEARTBEAT_DELAY_MS  = 5000   # initial delay before first backbone heartbeat
+HEARTBEAT_DELAY_MS  = 5000   # initial delay before first CommStat server heartbeat
 RIG_FETCH_DELAY_MS  = 100    # staggered delay for grid/callsign requests after rig select
 RIG_FREQ_DELAY_MS   = 200    # staggered delay for frequency request after rig select
 
