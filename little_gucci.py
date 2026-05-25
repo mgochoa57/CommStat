@@ -1862,6 +1862,7 @@ class SoundPlayer:
         self.sounds_dir = Path(sounds_dir)
         self._effects: Dict[str, QSoundEffect] = {}
         self._preview: Optional[QSoundEffect] = None
+        self._preview_proc: Optional[subprocess.Popen] = None
         self.reload_all()
 
     def reload(self, event: str) -> None:
@@ -1897,11 +1898,27 @@ class SoundPlayer:
         path = self.sounds_dir / filename
         if not path.exists():
             return
-        effect = QSoundEffect()
-        effect.setSource(QUrl.fromLocalFile(str(path.resolve())))
-        effect.setVolume(self.VOLUME)
-        self._preview = effect
-        effect.play()
+        abs_path = str(path.resolve())
+        if sys.platform == "darwin":
+            # QSoundEffect's CoreAudioOutput backend silently drops play()
+            # calls made from a statusChanged handler (re-entrancy issue on
+            # macOS). afplay is simpler and confirmed reliable.
+            if self._preview_proc is not None:
+                self._preview_proc.terminate()
+                self._preview_proc = None
+            self._preview_proc = subprocess.Popen(
+                ["/usr/bin/afplay", abs_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            effect = QSoundEffect()
+            effect.setVolume(self.VOLUME)
+            self._preview = effect
+            effect.statusChanged.connect(
+                lambda: effect.play() if effect.status() == QSoundEffect.Ready else None
+            )
+            effect.setSource(QUrl.fromLocalFile(abs_path))
 
 
 class MainWindow(QtWidgets.QMainWindow):
