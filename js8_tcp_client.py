@@ -204,8 +204,9 @@ class JS8CallTCPClient(QObject):
             self._was_connected = False
             self.connection_changed.emit(self.rig_name, False)
 
-        # Schedule reconnect if auto-reconnect is enabled and under max attempts
-        if self._auto_reconnect and self._reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
+        # Schedule reconnect if auto-reconnect is enabled. _try_reconnect is the
+        # single authority for the attempt cap and give-up.
+        if self._auto_reconnect and not self._reconnect_timer.isActive():
             print(f"[{self.rig_name}] Will retry in {RECONNECT_INTERVAL_MS // 1000}s...")
             self._reconnect_timer.start(RECONNECT_INTERVAL_MS)
 
@@ -308,45 +309,39 @@ class JS8CallTCPClient(QObject):
             self._was_connected = False
             self.connection_changed.emit(self.rig_name, False)
 
-        # Schedule reconnect on connection errors (if under max attempts)
+        # Schedule reconnect on connection errors. _try_reconnect is the single
+        # authority for the attempt cap and give-up.
         if self._auto_reconnect and error in (
             QAbstractSocket.ConnectionRefusedError,
             QAbstractSocket.RemoteHostClosedError,
             QAbstractSocket.NetworkError
         ):
-            if self._reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
-                if not self._reconnect_timer.isActive():
-                    print(f"[{self.rig_name}] Will retry in {RECONNECT_INTERVAL_MS // 1000}s...")
-                    self._reconnect_timer.start(RECONNECT_INTERVAL_MS)
-            else:
-                # Max attempts reached, give up
-                self._auto_reconnect = False
-                print(f"[{self.rig_name}] Giving up after {MAX_RECONNECT_ATTEMPTS} attempts. Use JS8 Connectors to reconnect.")
-                self.status_message.emit(
-                    self.rig_name,
-                    f"[{self.rig_name}] Reconnect failed. Use Menu > JS8 CONNECTORS to reconnect."
-                )
-                self.gave_up.emit(self.rig_name)
+            if not self._reconnect_timer.isActive():
+                print(f"[{self.rig_name}] Will retry in {RECONNECT_INTERVAL_MS // 1000}s...")
+                self._reconnect_timer.start(RECONNECT_INTERVAL_MS)
+
+    def _give_up_reconnect(self) -> None:
+        """Stop auto-reconnect after exhausting attempts. Idempotent: gated by
+        _auto_reconnect so gave_up is emitted at most once per session."""
+        self._auto_reconnect = False
+        self._reconnect_timer.stop()
+        print(f"[{self.rig_name}] Giving up after {MAX_RECONNECT_ATTEMPTS} attempts. Use JS8 Connectors to reconnect.")
+        self.status_message.emit(
+            self.rig_name,
+            f"[{self.rig_name}] Reconnect failed. Use Menu > JS8 CONNECTORS to reconnect."
+        )
+        self.gave_up.emit(self.rig_name)
 
     def _try_reconnect(self) -> None:
         """Attempt to reconnect to JS8Call."""
         if not self._auto_reconnect or self.is_connected():
             return
 
-        self._reconnect_attempts += 1
-
-        if self._reconnect_attempts > MAX_RECONNECT_ATTEMPTS:
-            # Give up after max attempts
-            self._auto_reconnect = False
-            print(f"[{self.rig_name}] Giving up after {MAX_RECONNECT_ATTEMPTS} attempts. Use JS8 Connectors to reconnect.")
-            self.status_message.emit(
-                self.rig_name,
-                f"[{self.rig_name}] Reconnect failed. Use Menu > JS8 CONNECTORS to reconnect."
-            )
-            self.gave_up.emit(self.rig_name)
+        if self._reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+            self._give_up_reconnect()
             return
 
-        remaining = MAX_RECONNECT_ATTEMPTS - self._reconnect_attempts
+        self._reconnect_attempts += 1
         print(f"[{self.rig_name}] Reconnect attempt {self._reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS}...")
         self.connect_to_host()
 

@@ -237,11 +237,6 @@ def load_selected_file(list_id):
     except Exception as e:
         logging.error(f"Error loading {filename}: {str(e)}")
 
-def validate_code_input(new_value):
-    if len(new_value) > 6:
-        return False
-    return bool(re.match(r'^[0-9]?[A-Za-z]?[A-Za-z]?[A-Za-z]*$', new_value))
-
 def decode_code(event=None):
     """Decode a brevity code using PyQt5 widgets from gui_widgets dict"""
     decode_entry = gui_widgets.get('decode_entry')
@@ -407,36 +402,6 @@ def decode_code(event=None):
         show_status_message(f"Error decoding code: {str(e)}", 10000)
         return f"Error decoding code: {str(e)}"
 
-
-def decode_to_report(code):
-    """Decode a brevity code and return the Brevity Report as a string."""
-    global emergency_list_mapping, positions, current_file, gui_widgets
-    emergency_list_mapping = get_json_files()
-    if not emergency_list_mapping:
-        return "Error: No valid JSON files found"
-    code = code.strip().upper()
-    # Create a mock decode_entry object
-    class MockEntry:
-        def text(self):
-            return code
-    # Temporarily replace gui_widgets
-    old_widgets = gui_widgets.copy() if gui_widgets else {}
-    gui_widgets['decode_entry'] = MockEntry()
-    gui_widgets['output_text'] = None
-    gui_widgets['narrative_text'] = None
-    gui_widgets['list_combo'] = None
-    gui_widgets['emergency_combo'] = None
-    gui_widgets['status_combo'] = None
-    gui_widgets['primary_combo'] = None
-    gui_widgets['secondary_combo'] = None
-    gui_widgets['severity_combo'] = None
-    
-    result = decode_code()
-    
-    # Restore gui_widgets
-    if old_widgets:
-        gui_widgets.update(old_widgets)
-    return result
 
 def clear_fields():
     global updating_menus
@@ -784,29 +749,6 @@ def handle_menu_select(key, text):
         
     
     on_field_change()
-
-def copy_code_text(copy_full_description=False):
-    """Copy brevity code or full description to clipboard"""
-    try:
-        from PyQt5.QtWidgets import QApplication
-        text = gui_widgets['output_text'].toPlainText()
-        if not text or not text.startswith("Brevity Code:"):
-            show_status_message("No brevity code available to copy", 10000)
-            logging.debug("No brevity code available")
-            return
-        first_line = text.split('\n')[0]
-        code = first_line[13:].split("File:")[0].strip()
-        if not code:
-            show_status_message("No brevity code available to copy", 10000)
-            logging.debug("Empty brevity code")
-            return
-        text_to_copy = text if copy_full_description else code
-        QApplication.clipboard().setText(text_to_copy)
-        show_status_message("Code copied to clipboard", 5000)
-        logging.debug(f"Copied {'full description' if copy_full_description else 'code'}")
-    except Exception as e:
-        show_status_message(f"Error copying code: {str(e)}", 10000)
-        logging.debug(f"Error copying code: {str(e)}")
 
 def _copy_code_and_return(return_file: str, code: str = None) -> None:
     """Write brevity code to return file and close (subprocess mode)."""

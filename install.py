@@ -196,11 +196,3 @@ def wininstall():
 
 
 oscheck()
-
-# test_python()
-
-
-# os.chdir(os.path.dirname(__file__))
-# print(os.getcwd())
-
-# runsettings()

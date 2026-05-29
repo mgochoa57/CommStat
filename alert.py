@@ -8,7 +8,6 @@ Allows creating and transmitting group callsign alerts via JS8Call.
 """
 
 import base64
-import os
 import re
 import sqlite3
 import sys
@@ -56,7 +55,7 @@ INTERNET_RIG = "INTERNET ONLY"
 _PROG_BG  = DEFAULT_COLORS.get("program_background",   "#A52A2A")
 _PROG_FG  = DEFAULT_COLORS.get("program_foreground",   "#FFFFFF")
 _PANEL_BG = DEFAULT_COLORS.get("module_background",    "#DDDDDD")
-_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#FFFFFF")
+_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#000000")
 
 _COL_CANCEL = "#555555"
 
@@ -692,10 +691,6 @@ class AlertDialog(QDialog):
                 self.on_alert_saved()
         except Exception as e:
             self._show_error(f"Failed to transmit alert: {e}")
-
-
-# Keep legacy name so any other import sites don't break immediately
-Ui_FormAlert = AlertDialog
 
 
 if __name__ == "__main__":

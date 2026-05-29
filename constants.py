@@ -32,24 +32,18 @@ RIG_FETCH_DELAY_MS  = 100    # staggered delay for grid/callsign requests after 
 RIG_FREQ_DELAY_MS   = 200    # staggered delay for frequency request after rig select
 
 FONT_ROBOTO   = "Roboto"
-FONT_SLAB     = "Roboto Slab"
 FONT_MONO     = "Kode Mono"
 
 # CSS font-family stacks — use in stylesheets for graceful fallback if fonts
 # are not installed (e.g. fresh Linux install without bundled .ttf files).
 FONT_ROBOTO_STACK = "Roboto"
 FONT_MONO_STACK   = "'Kode Mono'"
-FONT_SLAB_STACK   = "'Roboto Slab'"
-FONT_SIZE     = 13   # body / inputs
-FONT_SIZE_SM  = 13   # hints & tips
-FONT_SIZE_LG  = 16   # section / dialog headers
 
 # =============================================================================
 # UI Colors
 # =============================================================================
 
 # Input / form fields
-COLOR_INPUT_BG      = "#FFF5E1"
 COLOR_INPUT_TEXT    = "#333333"
 COLOR_INPUT_BORDER  = "#cccccc"
 COLOR_DISABLED_BG   = "#e9ecef"
@@ -61,15 +55,6 @@ COLOR_BTN_GREEN = "#28a745"
 COLOR_BTN_BLUE  = "#007bff"
 COLOR_BTN_CYAN  = "#17a2b8"
 COLOR_BTN_GRAY  = "#6c757d"
-
-# Labels
-COLOR_ERROR         = "#AA0000"
-COLOR_WARNING_LABEL = "#FF6600"
-
-# Misc
-COLOR_TOOLTIP_BG = "#FFFFE1"
-COLOR_ALERT_BG   = "#333333"
-COLOR_ALERT_TEXT = "#ffffff"
 
 # =============================================================================
 # Default Color Scheme (used by ConfigManager / config.ini)

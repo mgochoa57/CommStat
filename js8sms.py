@@ -8,7 +8,6 @@ JS8 SMS Dialog for CommStat
 Allows sending SMS messages via JS8Call APRS gateway.
 """
 
-import os
 from typing import TYPE_CHECKING
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -42,7 +41,7 @@ WINDOW_HEIGHT = 360
 _PROG_BG  = DEFAULT_COLORS.get("program_background",   "#A52A2A")
 _PROG_FG  = DEFAULT_COLORS.get("program_foreground",   "#FFFFFF")
 _PANEL_BG = DEFAULT_COLORS.get("module_background",    "#DDDDDD")
-_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#FFFFFF")
+_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#000000")
 
 
 # =============================================================================

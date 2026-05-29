@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import urllib.request
 import urllib.parse
+import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
@@ -71,13 +72,6 @@ def set_qrz_active(active: bool) -> bool:
             return cursor.rowcount > 0
     except sqlite3.Error:
         return False
-
-
-# Legacy function for backwards compatibility
-def load_qrz_credentials() -> Tuple[Optional[str], Optional[str]]:
-    """Load QRZ credentials from database."""
-    active, username, password = load_qrz_config()
-    return username, password
 
 
 def get_qrz_cached(callsign: str, include_stale: bool = False) -> Optional[Dict]:

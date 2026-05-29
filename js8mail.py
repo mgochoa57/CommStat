@@ -8,7 +8,6 @@ JS8 Email Dialog for CommStat
 Allows sending emails via JS8Call APRS gateway.
 """
 
-import os
 import re
 from typing import TYPE_CHECKING
 
@@ -44,7 +43,7 @@ WINDOW_HEIGHT = 335
 _PROG_BG  = DEFAULT_COLORS.get("program_background",   "#A52A2A")
 _PROG_FG  = DEFAULT_COLORS.get("program_foreground",   "#FFFFFF")
 _PANEL_BG = DEFAULT_COLORS.get("module_background",    "#DDDDDD")
-_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#FFFFFF")
+_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#000000")
 
 
 # =============================================================================

@@ -58,8 +58,6 @@ def _enable_windows_vt_mode() -> None:
 
 _enable_windows_vt_mode()
 import time
-import tempfile
-import webbrowser
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
@@ -85,21 +83,10 @@ from PyQt5.QtWidgets import qApp
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineProfile
 from PyQt5.QtWebEngineCore import QWebEngineUrlSchemeHandler, QWebEngineUrlScheme, QWebEngineUrlRequestJob
 from PyQt5.QtMultimedia import QSoundEffect
-from filter import FilterDialog
-from groups import GroupsDialog
-from js8mail import JS8MailDialog
-from js8sms import JS8SMSDialog
-from group_message import GroupMessageDialog
-from alert import AlertDialog
-from statrep import StatRepDialog
 from connector_manager import ConnectorManager
 from js8_tcp_client import TCPConnectionPool
-from js8_connectors import JS8ConnectorsDialog
 from id_utils import generate_time_based_id
 from constants import *
-from help import HelpDialog
-from user_settings import UserSettingsDialog
-from qrz_settings import QRZSettingsDialog
 
 
 # =============================================================================
@@ -396,48 +383,6 @@ def parse_message_datetime(utc: str) -> tuple:
 def expand_plus_shorthand(srcode: str) -> str:
     """Expand '+' shorthand to '111111111111' (all green status)."""
     return "111111111111" if srcode == "+" else srcode
-
-
-def extract_grid_from_text(text: str, default_grid: str) -> tuple:
-    """
-    Extract Maidenhead grid square from text.
-
-    Returns:
-        (grid_square, found_in_message)
-    """
-    # Pattern: 2 letters + 2 digits + optional 2 alphanumeric (e.g., EM15, EM15at)
-    match = re.search(r'\b([A-Z]{2}\d{2}[A-Z0-9]{0,2})\b', text, re.IGNORECASE)
-    if match:
-        return (match.group(1).upper(), True)
-    return (default_grid, False)
-
-
-def format_statrep_comments(raw_comments: str, abbreviations: dict, apply_norm: bool) -> str:
-    """
-    Format STATREP comments: apply smart title case and filter non-ASCII.
-
-    Args:
-        raw_comments: Raw comment text
-        abbreviations: Dictionary of known abbreviations for smart_title_case
-        apply_norm: Whether to apply text normalization
-
-    Returns:
-        Formatted comments string
-    """
-    if not raw_comments:
-        return ""
-
-    # Apply smart title case (preserves acronyms)
-    formatted = smart_title_case(raw_comments, abbreviations, apply_norm) if raw_comments else ""
-
-    # Remove non-ASCII characters (keep only space through tilde: ASCII 32-126)
-    formatted = re.sub(r'[^ -~]+', '', formatted).strip()
-
-    return formatted
-
-
-# REMOVED: extract_group_from_message() - Function was never called in codebase
-# Group extraction is now handled directly in message processing handlers
 
 
 def calculate_f304_status(digits: str, grid_found: bool) -> str:
@@ -1924,6 +1869,9 @@ class SoundPlayer:
 class MainWindow(QtWidgets.QMainWindow):
     """Main application window for CommStat."""
 
+    # Collapse a burst of inbound events into a single notification sound.
+    _SOUND_DEBOUNCE_MS = 300
+
     def __init__(self, config: ConfigManager, db: DatabaseManager):
         """
         Initialize the main window.
@@ -1937,6 +1885,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.db = db
 
         self._sound_player = SoundPlayer(config)
+        self._pending_sound_types: set = set()
+        self._sound_debounce_timer = QTimer(self)
+        self._sound_debounce_timer.setSingleShot(True)
+        self._sound_debounce_timer.timeout.connect(self._play_pending_sound)
 
         # Internet connectivity state
         self._internet_available = False
@@ -3368,7 +3320,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 conn.commit()
             print(f"{ConsoleColors.SUCCESS}[{rig_name}] Added {msg_type.upper()} {data.get(id_field, '')}{extra_info} from: {from_callsign}{ConsoleColors.RESET}")
             QtCore.QMetaObject.invokeMethod(
-                self, "_play_notification_sound",
+                self, "_queue_notification_sound",
                 QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(str, msg_type),
             )
@@ -3720,7 +3672,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_live_feed()
 
     @QtCore.pyqtSlot(int)
-    @QtCore.pyqtSlot(int)
     def _show_program_update_notification(self, new_build: int) -> None:
         """Show notification prompting user to restart (called from main thread)."""
         from ui_helpers import confirm
@@ -3851,17 +3802,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._backbone_fail_count += 1
             if self._backbone_fail_count >= self._backbone_max_failures:
                 self.backbone_timer.stop()
-
-    @QtCore.pyqtSlot()
-    def _reload_slideshow(self) -> None:
-        """Reload the slideshow."""
-        self._load_slideshow_images()
-        if self.slideshow_items:
-            self.slideshow_index = 0
-            self._show_current_image()
-        else:
-            self.map_disabled_label.setPixmap(QtGui.QPixmap())
-            self.map_disabled_label.setText("Map Disabled")
 
     def _setup_live_feed(self) -> None:
         """Create the live feed text area."""
@@ -4971,20 +4911,6 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         Cls = self._resolve_dialog_class("group_message", "GroupMessageDialog")
         dialog = Cls(self.tcp_pool, self.connector_manager, self._load_message_data, parent=self)
         dialog.exec_()
-
-    def _on_js8_message(self) -> None:
-        """Open JS8 Message dialog (RF transmit with QRZ lookup)."""
-        Cls = self._resolve_dialog_class("qrz_lookup", "JS8MessageDialog")
-        dlg = Cls(
-            program_background=self.config.get_color('program_background'),
-            program_foreground=self.config.get_color('program_foreground'),
-            module_background=self.config.get_color('module_background'),
-            module_foreground=self.config.get_color('module_foreground'),
-            tcp_pool=self.tcp_pool,
-            connector_manager=self.connector_manager,
-            parent=self,
-        )
-        dlg.exec_()
 
     def _on_group_alert(self) -> None:
         """Open Group Alert window."""
@@ -6348,9 +6274,22 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         dlg.exec_()
 
     @QtCore.pyqtSlot(str)
-    def _play_notification_sound(self, msg_type: str) -> None:
-        """Play a notification sound on the main thread (safe for cross-thread calls)."""
-        self._sound_player.play(msg_type)
+    def _queue_notification_sound(self, msg_type: str) -> None:
+        """Accumulate sound type and (re)start debounce timer."""
+        self._pending_sound_types.add(msg_type)
+        self._sound_debounce_timer.start(self._SOUND_DEBOUNCE_MS)
+
+    def _play_pending_sound(self) -> None:
+        """Play the highest-priority enabled pending sound, then clear the queue."""
+        for msg_type in ("alert", "message", "statrep"):
+            if msg_type in self._pending_sound_types:
+                # play() no-ops if this event's sound is disabled, so keep
+                # scanning so a disabled high-priority type can't mute an
+                # enabled lower-priority one.
+                if self.config.get_sound_enabled(msg_type):
+                    self._sound_player.play(msg_type)
+                    break
+        self._pending_sound_types.clear()
 
     def _on_sound_settings(self) -> None:
         """Open Sound Settings dialog (per-event sound file + enable)."""
@@ -6380,7 +6319,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             error_prefix: Prefix for error message (e.g., "Failed to load band conditions").
         """
         panel_bg = DEFAULT_COLORS.get("module_background", "#DDDDDD")
-        panel_fg = DEFAULT_COLORS.get("module_foreground", "#FFFFFF")
+        panel_fg = DEFAULT_COLORS.get("module_foreground", "#000000")
 
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(title)

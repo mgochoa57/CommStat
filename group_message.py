@@ -9,7 +9,6 @@ Allows creating and transmitting group messages via JS8Call.
 """
 
 import base64
-import os
 import re
 import sqlite3
 import threading
@@ -43,8 +42,6 @@ if TYPE_CHECKING:
 # Constants
 # =============================================================================
 
-MIN_CALLSIGN_LENGTH  = 4
-MAX_CALLSIGN_LENGTH  = 8
 MIN_MESSAGE_LENGTH   = 4
 MAX_MESSAGE_LENGTH   = 1500
 MAX_MESSAGE_LENGTH_INTERNET = 1500
@@ -58,7 +55,7 @@ INTERNET_RIG = "INTERNET ONLY"
 _PROG_BG  = DEFAULT_COLORS.get("program_background",   "#A52A2A")
 _PROG_FG  = DEFAULT_COLORS.get("program_foreground",   "#FFFFFF")
 _PANEL_BG = DEFAULT_COLORS.get("module_background",    "#DDDDDD")
-_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#FFFFFF")
+_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#000000")
 _DATA_BG  = DEFAULT_COLORS.get("data_background",      "#F8F6F4")
 _DATA_FG  = DEFAULT_COLORS.get("data_foreground",      "#000000")
 
@@ -67,8 +64,6 @@ _COL_CANCEL = "#555555"
 _WIN_W          = 640
 _WIN_H_RF       = 420
 _WIN_H_INTERNET = 420
-
-CALLSIGN_PATTERN = re.compile(r'[A-Z0-9]{1,3}[0-9][A-Z]{1,3}')
 
 
 # =============================================================================

@@ -15,8 +15,6 @@ import datetime
 import io
 import os
 import sqlite3
-import subprocess
-import sys
 import tempfile
 import threading
 import urllib.parse
@@ -844,6 +842,8 @@ class QRZLookupDialog(QDialog):
             self.cs_edit.blockSignals(False)
 
     def _search(self) -> None:
+        if self._thread is not None and self._thread.isRunning():
+            return
         cs = self.cs_edit.text().strip().upper()
         if not cs:
             return
@@ -1177,6 +1177,8 @@ class JS8MessageDialog(QDialog):
         self.freq_edit.setText(f"{dial_freq / 1_000_000:.3f} MHz")
 
     def _search(self) -> None:
+        if self._qrz_thread is not None and self._qrz_thread.isRunning():
+            return
         cs = self.cs_edit.text().strip().upper()
         if not cs:
             return

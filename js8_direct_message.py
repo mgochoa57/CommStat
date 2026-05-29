@@ -70,7 +70,7 @@ _CALLSIGN_PATTERN = re.compile(r"^[A-Z0-9/]{3,12}$")
 _PROG_BG    = DEFAULT_COLORS.get("program_background",   "#A52A2A")
 _PROG_FG    = DEFAULT_COLORS.get("program_foreground",   "#FFFFFF")
 _PANEL_BG   = DEFAULT_COLORS.get("module_background",    "#DDDDDD")
-_PANEL_FG   = DEFAULT_COLORS.get("module_foreground",    "#FFFFFF")
+_PANEL_FG   = DEFAULT_COLORS.get("module_foreground",    "#000000")
 _COL_HELP   = "#e83e8c"  # matches StatRep help button
 _COL_CANCEL = "#555555"
 
@@ -377,11 +377,20 @@ class JS8DirectMessageDialog(QDialog):
             return
 
         name    = (cached.get("name")    or "").strip()
+        city    = (cached.get("city")    or "").strip()
+        state   = (cached.get("state")   or "").strip()
         country = (cached.get("country") or "").strip()
-        if name and country:
-            text = f"{name} | {country}"
-        else:
-            text = name or country
+
+        location_parts = []
+        if city and state:
+            location_parts.append(f"{city}, {state}")
+        elif city:
+            location_parts.append(city)
+        elif state:
+            location_parts.append(state)
+
+        parts = [p for p in (name, ", ".join(location_parts) if location_parts else "", country) if p]
+        text = " | ".join(parts)
         if not text:
             self.qrz_info_label.setText(QRZ_MISS_TEXT)
             self.qrz_info_label.setStyleSheet(
@@ -432,11 +441,9 @@ class JS8DirectMessageDialog(QDialog):
         connected = set(self.tcp_pool.get_connected_rig_names())
         available = [c['rig_name'] for c in enabled if c['rig_name'] in connected]
 
-        if not available:
-            pass
-        elif len(available) == 1:
+        if len(available) == 1:
             self.rig_combo.addItem(available[0])
-        else:
+        elif len(available) > 1:
             self.rig_combo.addItem("")
             for name in available:
                 self.rig_combo.addItem(name)

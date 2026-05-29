@@ -9,7 +9,6 @@ Allows creating and transmitting AMRRON Status Reports via JS8Call.
 """
 
 import base64
-import os
 import re
 import subprocess
 import sqlite3
@@ -110,7 +109,7 @@ _PROG_BG    = DEFAULT_COLORS.get("program_background",  "#000000")
 _PROG_FG    = DEFAULT_COLORS.get("program_foreground",  "#FFFFFF")
 _DATA_BG    = DEFAULT_COLORS.get("data_background",     "#F8F6F4")
 _PANEL_BG   = DEFAULT_COLORS.get("module_background",   "#DDDDDD")
-_PANEL_FG   = DEFAULT_COLORS.get("module_foreground",   "#FFFFFF")
+_PANEL_FG   = DEFAULT_COLORS.get("module_foreground",   "#000000")
 _COL_CANCEL = "#555555"
 _COL_GRAY   = "#6c757d"
 _COL_PURPLE = "#6f42c1"

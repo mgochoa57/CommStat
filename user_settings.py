@@ -9,7 +9,6 @@ with Add, Edit, and Delete actions.  At most one entry is allowed.
 Editing is done inline directly in the table row.
 """
 
-import os
 from typing import Optional
 
 from PyQt5 import QtGui
@@ -28,7 +27,7 @@ from ui_helpers import make_button, make_input, make_combobox, confirm, apply_st
 _PROG_BG  = DEFAULT_COLORS.get("program_background",   "#A52A2A")
 _PROG_FG  = DEFAULT_COLORS.get("program_foreground",   "#FFFFFF")
 _PANEL_BG = DEFAULT_COLORS.get("module_background",    "#DDDDDD")
-_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#FFFFFF")
+_PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#000000")
 _TITLE_BG = DEFAULT_COLORS.get("title_bar_background", "#F07800")
 _TITLE_FG = DEFAULT_COLORS.get("title_bar_foreground", "#FFFFFF")
 _DATA_BG  = DEFAULT_COLORS.get("data_background",      "#F8F6F4")

@@ -22,10 +22,9 @@ def _current_msg_id() -> str:
     now = datetime.now(timezone.utc)
     return f"{HOUR_LETTERS[now.hour]}{now.minute:02d}"
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 DEFAULT_PORT = 2822
-MOCK_CALLSIGN = "W1TEST"
 MOCK_GRID = "EM50"
 DEFAULT_MY_CALLSIGN = "W1TEST"
 
