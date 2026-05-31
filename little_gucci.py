@@ -731,13 +731,16 @@ class CustomWebEnginePage(QWebEnginePage):
                         try:
                             from qrz_lookup import StatRepDetailDialog
                             _FC = 3
-                            record_list = []
-                            for r in range(mw.statrep_table.rowCount()):
-                                ci = mw.statrep_table.item(r, _FC)
-                                if ci:
-                                    rid = ci.data(QtCore.Qt.UserRole)
-                                    if rid is not None:
-                                        record_list.append((rid, ci.text().strip()))
+                            table = mw.statrep_table
+                            def build_record_list():
+                                items = []
+                                for r in range(table.rowCount()):
+                                    ci = table.item(r, _FC)
+                                    if ci:
+                                        rid = ci.data(QtCore.Qt.UserRole)
+                                        if rid is not None:
+                                            items.append((rid, ci.text().strip()))
+                                return items
                             dlg = StatRepDetailDialog(
                                 sr_id, callsign, mw._internet_available,
                                 backbone_url=_BACKBONE,
@@ -754,7 +757,7 @@ class CustomWebEnginePage(QWebEnginePage):
                                 condition_gray=mw.config.get_color('condition_gray'),
                                 tcp_pool=mw.tcp_pool,
                                 connector_manager=mw.connector_manager,
-                                record_list=record_list,
+                                record_list_provider=build_record_list,
                                 parent=mw
                             )
                             dlg.pin_changed.connect(
@@ -1298,7 +1301,7 @@ class DatabaseManager:
 
                 if show_all:
                     # Show all messages regardless of group
-                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source
+                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source, delivered
                                FROM messages
                                WHERE {date_condition}
                                ORDER BY datetime DESC"""
@@ -1307,7 +1310,7 @@ class DatabaseManager:
                     # Filter by active groups (add @ prefix for matching)
                     groups_with_at = ["@" + g for g in groups]
                     placeholders = ",".join("?" * len(groups_with_at))
-                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source
+                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source, delivered
                                FROM messages
                                WHERE target IN ({placeholders}) AND {date_condition}
                                ORDER BY datetime DESC"""
@@ -1903,6 +1906,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcp_pool.any_status_message.connect(self._handle_status_message)
         self.tcp_pool.any_callsign_received.connect(self._handle_callsign_received)
         self.tcp_pool.any_grid_received.connect(self._handle_grid_received)
+
+        # Live-bold StatRep/Message rows when a QRZ API lookup writes to the qrz table
+        from qrz_lookup import qrz_cache_notifier
+        qrz_cache_notifier.record_written.connect(self._on_qrz_record_written)
 
         # Store station info by rig name (persists even if connection is lost)
         self.rig_callsigns: Dict[str, str] = {}
@@ -2989,24 +2996,29 @@ class MainWindow(QtWidgets.QMainWindow):
             if not callsign:
                 callsign = "UNKNOWN"
 
-            # Get db_version, build_number, and data_id from controls table
+            # Get db_version, build_number, data_id, and qrz_id from controls table
             db_version = 0
             build_number = 500  # Default fallback
             data_id = 0  # Default fallback
+            qrz_id = 0  # Default fallback
             try:
                 with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
                     cursor = conn.cursor()
-                    cursor.execute("SELECT db_version, build_number, data_id FROM controls WHERE id = 1")
+                    cursor.execute("SELECT db_version, build_number, data_id, qrz_id FROM controls WHERE id = 1")
                     result = cursor.fetchone()
                     if result:
                         db_version = result[0]
                         build_number = result[1] if len(result) > 1 else 500
                         data_id = result[2] if len(result) > 2 else 0
+                        qrz_id = result[3] if len(result) > 3 and result[3] is not None else 0
             except sqlite3.Error:
                 pass  # Use default values if query fails
 
-            # Build heartbeat URL with callsign, data_id, db_version, and build_number parameters
-            heartbeat_url = f"{_PING}?cs={callsign}&id={data_id}&db={db_version}&build={build_number}"
+            # Only report qrz_id when at least one JS8 connector is in "Connected" status
+            qrz_value = qrz_id if self.tcp_pool.get_connected_rig_names() else 0
+
+            # Build heartbeat URL with callsign, data_id, qrz_id, db_version, and build_number parameters
+            heartbeat_url = f"{_PING}?cs={callsign}&id={data_id}&qrz={qrz_value}&db={db_version}&build={build_number}"
 
             with urllib.request.urlopen(heartbeat_url, timeout=10) as response:
                 content = response.read().decode('utf-8')
@@ -3489,11 +3501,35 @@ class MainWindow(QtWidgets.QMainWindow):
                     raw_payload = raw_payload[len(_tag):]
                     if "," in raw_payload:
                         callsign, msg_text = raw_payload.split(",", 1)
-                        print(f"[COMMSRVR] {_label} — callsign={callsign.strip()!r}  msg={msg_text.strip()!r}")
+                        callsign = callsign.strip()
+
+                        # ::DELIVERED:: now arrives as CALLSIGN,DATE,MSG_ID,message
+                        # (older format was just CALLSIGN,message). When the date
+                        # and msg_id are present, flag the matching sent message as
+                        # delivered and strip them from the popup text.
+                        if _tag == "::DELIVERED::":
+                            _deliv = re.match(
+                                r'^(\d{4}-\d{2}-\d{2}),([^,]+),(.*)$', msg_text, re.DOTALL
+                            )
+                            if _deliv:
+                                _date, _msgid, msg_text = (
+                                    _deliv.group(1).strip(),
+                                    _deliv.group(2).strip(),
+                                    _deliv.group(3),
+                                )
+                                QtCore.QMetaObject.invokeMethod(
+                                    self, "_mark_message_delivered",
+                                    QtCore.Qt.QueuedConnection,
+                                    QtCore.Q_ARG(str, callsign),
+                                    QtCore.Q_ARG(str, _date),
+                                    QtCore.Q_ARG(str, _msgid),
+                                )
+
+                        print(f"[COMMSRVR] {_label} — callsign={callsign!r}  msg={msg_text.strip()!r}")
                         QtCore.QMetaObject.invokeMethod(
                             self, _slot,
                             QtCore.Qt.QueuedConnection,
-                            QtCore.Q_ARG(str, callsign.strip()),
+                            QtCore.Q_ARG(str, callsign),
                             QtCore.Q_ARG(str, msg_text.strip())
                         )
                     else:
@@ -3618,6 +3654,28 @@ class MainWindow(QtWidgets.QMainWindow):
             import traceback
             traceback.print_exc()
             return False
+
+    @QtCore.pyqtSlot(str, str, str)
+    def _mark_message_delivered(self, callsign: str, date: str, msg_id: str) -> None:
+        """Flag a sent message as delivered and refresh the message table.
+
+        Fired when the backbone returns ::DELIVERED::CALLSIGN,DATE,MSG_ID,...
+        The row we sent has the recipient in the target column, so match on
+        target/date/msg_id. Runs on the GUI thread (queued) so the table
+        refresh — which touches Qt widgets — is safe.
+        """
+        try:
+            with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                conn.execute(
+                    "UPDATE messages SET delivered = 1 "
+                    "WHERE target = ? AND date = ? AND msg_id = ?",
+                    (callsign, date, msg_id)
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            print(f"[DELIVERED] Failed to mark message delivered: {e}")
+
+        self._load_message_data()
 
     @QtCore.pyqtSlot(str, str)
     def _show_delivered_popup(self, callsign: str, message: str) -> None:
@@ -4400,13 +4458,16 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             if callsign_item:
                 callsign  = callsign_item.text().strip()
                 record_id = callsign_item.data(QtCore.Qt.UserRole)
-                record_list = []
-                for r in range(self.statrep_table.rowCount()):
-                    ci = self.statrep_table.item(r, _FROM_COL)
-                    if ci:
-                        rid = ci.data(QtCore.Qt.UserRole)
-                        if rid is not None:
-                            record_list.append((rid, ci.text().strip()))
+                table = self.statrep_table
+                def build_record_list():
+                    items = []
+                    for r in range(table.rowCount()):
+                        ci = table.item(r, _FROM_COL)
+                        if ci:
+                            rid = ci.data(QtCore.Qt.UserRole)
+                            if rid is not None:
+                                items.append((rid, ci.text().strip()))
+                    return items
                 from qrz_lookup import StatRepDetailDialog
                 dlg = StatRepDetailDialog(
                     record_id, callsign, self._internet_available,
@@ -4424,7 +4485,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                     condition_gray=self.config.get_color('condition_gray'),
                     tcp_pool=self.tcp_pool,
                     connector_manager=self.connector_manager,
-                    record_list=record_list,
+                    record_list_provider=build_record_list,
                     parent=self
                 )
                 dlg.pin_changed.connect(
@@ -4472,6 +4533,21 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             text = item.text().strip()
             if text:
                 QtWidgets.QApplication.clipboard().setText(text)
+
+    def _on_qrz_record_written(self, callsign: str) -> None:
+        """Bold any matching From-callsign (col 3) cells in StatRep and Message tables."""
+        cs = callsign.strip().upper()
+        if not cs:
+            return
+        for table in (self.statrep_table, self.message_table):
+            for row in range(table.rowCount()):
+                item = table.item(row, 3)
+                if item and item.text().strip().upper() == cs:
+                    font = item.font()
+                    if not font.bold():
+                        font.setBold(True)
+                        item.setFont(font)
+                    item.setToolTip("Exists in QRZ local cache")
 
     def _on_qrz_contacts_menu(self) -> None:
         """Toggle QRZ Contacts view; switch back to map if already showing."""
@@ -4547,6 +4623,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             module_foreground=self.config.get_color('module_foreground'),
             program_background=self.config.get_color('program_background'),
             program_foreground=self.config.get_color('program_foreground'),
+            refresh_callback=self._load_message_data,
             parent=self
         )
         dlg.exec_()
@@ -4893,7 +4970,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
     def _on_js8_direct_message(self) -> None:
         """Open JS8 Direct Message window."""
         Cls = self._resolve_dialog_class("js8_direct_message", "JS8DirectMessageDialog")
-        dialog = Cls(self.tcp_pool, self.connector_manager, self)
+        dialog = Cls(self.tcp_pool, self.connector_manager, self._load_message_data, parent=self)
         dialog.exec_()
 
     def _on_statrep(self) -> None:
@@ -5038,12 +5115,6 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         for row_num, row_data in enumerate(data):
             table.insertRow(row_num)
 
-            # Check if this row should be bold (direct message, no @ symbol)
-            bold_row = False
-            if is_message_table and len(row_data) > 4:
-                to_value = str(row_data[4]) if row_data[4] is not None else ""
-                bold_row = to_value and not to_value.startswith("@")
-
             for col_num, value in enumerate(row_data):
                 display_value = str(value) if value is not None else ""
 
@@ -5138,13 +5209,20 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                         font.setBold(True)
                         item.setFont(font)
                         item.setToolTip("Exists in QRZ local cache")
-                # Bold To callsign (col 4) if direct message OR matches user's callsign
+                # Bold To callsign (col 4) only when it matches the user's callsign
                 elif col_num == 4:
                     to_call = display_value.upper()
-                    if bold_row or (is_message_table and user_callsign and to_call == user_callsign):
+                    if is_message_table and user_callsign and to_call == user_callsign:
                         font = item.font()
                         font.setBold(True)
                         item.setFont(font)
+                # Bold the message ID (col 5) with a "Delivered" tooltip once the
+                # backbone confirms delivery (delivered = 1 in the messages table).
+                elif is_message_table and col_num == 5 and len(row_data) > 8 and row_data[8]:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setToolTip("  Delivery Confirmed")
 
                 if status_colors and value in status_colors:
                     color = QColor(self.config.get_color(status_colors[value]))

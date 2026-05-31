@@ -20,12 +20,12 @@ import threading
 import urllib.parse
 import urllib.request
 import webbrowser
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import folium
 import maidenhead as mh
 from PyQt5 import QtGui
-from PyQt5.QtCore import QBuffer, QByteArray, QSize, Qt, QThread, QUrl, pyqtSignal
+from PyQt5.QtCore import QBuffer, QByteArray, QObject, QSize, Qt, QThread, QUrl, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QDesktopServices, QFont, QMovie, QPainter, QPixmap
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import (
@@ -100,6 +100,7 @@ def _btn(label: str, color: str, min_w: int = 90) -> QPushButton:
         f" font-weight:bold; }}"
         f"QPushButton:hover {{ background-color:{color}; opacity:0.9; }}"
         f"QPushButton:pressed {{ background-color:{color}; }}"
+        f"QPushButton:disabled {{ background-color:#cccccc; color:#888888; }}"
     )
     return b
 
@@ -272,6 +273,15 @@ class _ReadCountThread(QThread):
             self.count_ready.emit("")
 
 
+class _QRZCacheNotifier(QObject):
+    """Module-level emitter fired whenever a QRZ API lookup returns data
+    (cache was just written or refreshed in the qrz table)."""
+    record_written = pyqtSignal(str)  # callsign (uppercase)
+
+
+qrz_cache_notifier = _QRZCacheNotifier()
+
+
 class _QRZThread(QThread):
     """Performs a QRZ callsign lookup in the background."""
     result_ready = pyqtSignal(object)  # dict or None
@@ -284,7 +294,10 @@ class _QRZThread(QThread):
 
     def run(self) -> None:
         client = QRZClient(self.username, self.password)
-        self.result_ready.emit(client.lookup(self.callsign))
+        data = client.lookup(self.callsign)
+        if data:
+            qrz_cache_notifier.record_written.emit(self.callsign.upper())
+        self.result_ready.emit(data)
 
 
 # ── Clickable image label ──────────────────────────────────────────────────
@@ -545,6 +558,36 @@ class _QRZInfoSection(QWidget):
 
         self._main_layout.addLayout(sr_grid)
 
+    def add_message_rows(self) -> None:
+        """Add Message Details fields below the QRZ section, spanning all three columns."""
+        self._grid.setRowStretch(8, 0)
+
+        msg_grid = QGridLayout()
+        msg_grid.setSpacing(2)
+        msg_grid.setColumnStretch(0, 1)
+        msg_grid.setColumnStretch(1, 1)
+        msg_grid.setColumnStretch(2, 1)
+
+        self.lbl_msg_target = QLabel(); self.lbl_msg_target.setFont(_mono_font())
+        self.lbl_msg_freq   = QLabel(); self.lbl_msg_freq.setFont(_mono_font())
+        self.lbl_msg_posted = QLabel(); self.lbl_msg_posted.setFont(_mono_font())
+        self.lbl_msg_id     = QLabel(); self.lbl_msg_id.setFont(_mono_font())
+        self.lbl_msg_source = QLabel(); self.lbl_msg_source.setFont(_mono_font())
+
+        msg_hdr = QLabel("Message Details")
+        msg_hdr.setFont(_lbl_font())
+
+        # Row 0: header | To:     | Freq:
+        msg_grid.addWidget(msg_hdr,              0, 0)
+        msg_grid.addWidget(self.lbl_msg_target,  0, 1)
+        msg_grid.addWidget(self.lbl_msg_freq,    0, 2)
+        # Row 1: Posted: | Message ID: | Received via:
+        msg_grid.addWidget(self.lbl_msg_posted,  1, 0)
+        msg_grid.addWidget(self.lbl_msg_id,      1, 1)
+        msg_grid.addWidget(self.lbl_msg_source,  1, 2)
+
+        self._main_layout.addLayout(msg_grid)
+
     def set_qrz_status(self, text: str) -> None:
         self.lbl_qrz_status.setText(text)
         self.lbl_qrz_status.setVisible(True)
@@ -717,6 +760,7 @@ class QRZLookupDialog(QDialog):
                  program_foreground: str = "",
                  initial_callsign: str = "",
                  initial_message: str = "",
+                 refresh_callback=None,
                  parent=None):
         super().__init__(parent)
         apply_standard_dialog_chrome(self, "QRZ Lookup")
@@ -728,6 +772,7 @@ class QRZLookupDialog(QDialog):
         self._program_bg = program_background or _PROG_BG
         self._program_fg = program_foreground or _PROG_FG
         self._thread: Optional[_QRZThread] = None
+        self._refresh_callback = refresh_callback
         self._send_result.connect(self._on_send_result)
         self._setup_ui()
 
@@ -953,6 +998,36 @@ class QRZLookupDialog(QDialog):
         threading.Thread(
             target=self._submit_internet, args=(my_cs, data_string), daemon=True
         ).start()
+
+        # Write to the local messages table so the sent message shows up in the
+        # message log, mirroring group_message.py's internet path. Done here on
+        # the send (not in the backbone callback) for the same reason.
+        self._save_to_local_messages(my_cs, cs, text, msg_id, now)
+        if self._refresh_callback:
+            self._refresh_callback()
+
+    def _save_to_local_messages(self, from_cs: str, target_cs: str,
+                                message: str, msg_id: str, now: str) -> None:
+        """Insert a just-sent internet direct message into the local messages
+        table, mirroring group_message.py's _save_to_database.
+
+        Internet send → source 3, freq 0; db follows the group_message
+        convention of 30 for a locally-originated message. The recipient
+        callsign goes in target (matching how received direct messages are
+        stored). The message body keeps its ||-encoded newlines; the table
+        display decodes them back to \\n.
+        """
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO messages "
+                    "(datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (now, now[:10], 0, 30, 3, msg_id, from_cs, target_cs, message)
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            print(f"[QRZLookupDialog] failed to save sent message to local table: {e}")
 
     def _submit_internet(self, callsign: str, data_string: str) -> None:
         try:
@@ -1293,6 +1368,7 @@ class StatRepDetailDialog(QDialog):
                  tcp_pool=None,
                  connector_manager=None,
                  record_list: list = None,
+                 record_list_provider: Optional[Callable[[], list]] = None,
                  parent=None):
         super().__init__(parent)
         self.setWindowFlags(
@@ -1324,9 +1400,11 @@ class StatRepDetailDialog(QDialog):
         self._connector_manager = connector_manager
         self._thread: Optional[_QRZThread] = None
         self._rc_thread: Optional[_ReadCountThread] = None
+        self._reload_token: int = 0
         self._map_loaded = False
         self._last_nav: str = "older"
         self._record_list: list = list(record_list) if record_list else []
+        self._record_list_provider = record_list_provider
         self._global_id = 0
         self._row_data: dict = {}
         self._sr_datetime: str = ""
@@ -1344,6 +1422,7 @@ class StatRepDetailDialog(QDialog):
         self._setup_ui()
         self._load_statrep()
         self._start_qrz()
+        self._update_nav_buttons()
 
     def _setup_ui(self) -> None:
         self.setStyleSheet(
@@ -1421,13 +1500,13 @@ class StatRepDetailDialog(QDialog):
         self.btn_delete.clicked.connect(self._on_delete)
         btn_row.addWidget(self.btn_delete)
 
-        btn_newer = _btn("Next", _COL_NAV)
-        btn_newer.clicked.connect(self._on_newer)
-        btn_row.addWidget(btn_newer)
+        self.btn_older = _btn("Previous", _COL_NAV)
+        self.btn_older.clicked.connect(self._on_older)
+        btn_row.addWidget(self.btn_older)
 
-        btn_older = _btn("Previous", _COL_NAV)
-        btn_older.clicked.connect(self._on_older)
-        btn_row.addWidget(btn_older)
+        self.btn_newer = _btn("Next", _COL_NAV)
+        self.btn_newer.clicked.connect(self._on_newer)
+        btn_row.addWidget(self.btn_newer)
 
         self.btn_message_sr = _btn("Message", COLOR_BTN_BLUE)
         self.btn_message_sr.clicked.connect(self._on_message_clicked)
@@ -1521,8 +1600,11 @@ class StatRepDetailDialog(QDialog):
         if global_id and self._backbone_url and self.internet_available:
             local_cs = _get_local_callsign()
             if local_cs:
+                rc_token = self._reload_token
                 self._rc_thread = _ReadCountThread(self._backbone_url, local_cs, global_id)
-                self._rc_thread.count_ready.connect(self._on_read_count)
+                self._rc_thread.count_ready.connect(
+                    lambda text, t=rc_token: self._on_read_count(text) if t == self._reload_token else None
+                )
                 self._rc_thread.start()
 
         for i, (label_text, _) in enumerate(STATUS_FIELDS):
@@ -1923,23 +2005,46 @@ class StatRepDetailDialog(QDialog):
         self._last_nav = "older"
         self._navigate("older")
 
+    def _get_record_list(self) -> list:
+        if self._record_list_provider is not None:
+            try:
+                return self._record_list_provider() or []
+            except Exception as e:
+                print(f"[StatRepDetailDialog] record_list_provider error: {e}")
+        return self._record_list
+
+    def _find_index(self, record_list: list, record_id) -> Optional[int]:
+        return next(
+            (i for i, (rid, _) in enumerate(record_list)
+             if str(rid) == str(record_id)),
+            None
+        )
+
+    def _update_nav_buttons(self, record_list: Optional[list] = None) -> None:
+        if record_list is None:
+            record_list = self._get_record_list()
+        idx = self._find_index(record_list, self._record_id) if record_list else None
+        n = len(record_list)
+        self.btn_newer.setEnabled(idx is not None and idx > 0)
+        self.btn_older.setEnabled(idx is not None and idx < n - 1)
+
     def _navigate(self, direction: str) -> None:
-        if self._record_list:
-            idx = next(
-                (i for i, (rid, _) in enumerate(self._record_list)
-                 if str(rid) == str(self._record_id)),
-                None
-            )
+        record_list = self._get_record_list()
+        if record_list:
+            idx = self._find_index(record_list, self._record_id)
             if idx is None:
+                self._update_nav_buttons(record_list)
                 return
             if direction == "newer":
                 if idx <= 0:
+                    self._update_nav_buttons(record_list)
                     return
-                next_id, next_cs = self._record_list[idx - 1]
+                next_id, next_cs = record_list[idx - 1]
             else:
-                if idx >= len(self._record_list) - 1:
+                if idx >= len(record_list) - 1:
+                    self._update_nav_buttons(record_list)
                     return
-                next_id, next_cs = self._record_list[idx + 1]
+                next_id, next_cs = record_list[idx + 1]
             self._reload(next_id, next_cs)
             return
         try:
@@ -1965,11 +2070,20 @@ class StatRepDetailDialog(QDialog):
 
     def _reload(self, record_id, callsign: str) -> None:
         self._save_statrep_memo()
-        if self._thread and self._thread.isRunning():
-            self._thread.result_ready.disconnect()
+        self._reload_token += 1
+        self.btn_newer.setEnabled(False)
+        self.btn_older.setEnabled(False)
+        if self._thread is not None:
+            try:
+                self._thread.result_ready.disconnect()
+            except (TypeError, RuntimeError):
+                pass
             self._thread = None
-        if self._rc_thread and self._rc_thread.isRunning():
-            self._rc_thread.count_ready.disconnect()
+        if self._rc_thread is not None:
+            try:
+                self._rc_thread.count_ready.disconnect()
+            except (TypeError, RuntimeError):
+                pass
             self._rc_thread = None
         self._record_id = record_id
         self.callsign = callsign
@@ -1984,6 +2098,7 @@ class StatRepDetailDialog(QDialog):
         self.map_view.setHtml("", QUrl("http://localhost/"))
         self._load_statrep()
         self._start_qrz()
+        self._update_nav_buttons()
 
     def _on_delete(self) -> None:
         from ui_helpers import confirm
@@ -2012,24 +2127,21 @@ class StatRepDetailDialog(QDialog):
             pass
         self.record_deleted.emit()
         direction = self._last_nav
-        if self._record_list:
-            idx = next(
-                (i for i, (rid, _) in enumerate(self._record_list)
-                 if str(rid) == str(deleted_id)),
-                None
-            )
-            if idx is not None:
-                self._record_list.pop(idx)
-            if self._record_list:
-                if direction == "newer":
-                    next_idx = max(0, idx - 1) if idx is not None else 0
-                else:
-                    next_idx = min(idx, len(self._record_list) - 1) if idx is not None else len(self._record_list) - 1
-                next_id, next_cs = self._record_list[next_idx]
-                self._record_id = next_id
-                self._reload(next_id, next_cs)
-            else:
+        full_list = self._get_record_list()
+        if full_list:
+            idx_before = self._find_index(full_list, deleted_id)
+            remaining = [(rid, cs) for (rid, cs) in full_list if str(rid) != str(deleted_id)]
+            if not remaining:
                 self.accept()
+                return
+            if idx_before is None:
+                next_idx = 0 if direction == "newer" else len(remaining) - 1
+            elif direction == "newer":
+                next_idx = max(0, idx_before - 1)
+            else:
+                next_idx = min(idx_before, len(remaining) - 1)
+            next_id, next_cs = remaining[next_idx]
+            self._reload(next_id, next_cs)
             return
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
@@ -2085,8 +2197,11 @@ class StatRepDetailDialog(QDialog):
             return
 
         # No fresh cache (missing or stale) — live lookup; QRZClient handles stale refresh
+        token = self._reload_token
         self._thread = _QRZThread(self.callsign, username, password)
-        self._thread.result_ready.connect(self._on_qrz_result)
+        self._thread.result_ready.connect(
+            lambda result, t=token: self._on_qrz_result(result) if t == self._reload_token else None
+        )
         self._thread.start()
 
     def _save_contact_memo(self) -> None:
@@ -2212,19 +2327,21 @@ class MessageDetailDialog(QDialog):
         self._program_fg = program_foreground or _PROG_FG
         self._msg_id = msg_id
         self._thread: Optional[_QRZThread] = None
+        self._reload_token: int = 0
         self._map_loaded = False
         self._deleted_any = False
         self._last_nav: str = "older"
         self._msg_datetime: str = ""
         self.setWindowTitle(f"Message — {callsign}")
         self.setModal(True)
-        self.setMinimumSize(996, 555)
-        self.resize(996, 555)
+        self.setMinimumSize(996, 588)
+        self.resize(996, 588)
         if os.path.exists("radiation-32.png"):
             self.setWindowIcon(QtGui.QIcon("radiation-32.png"))
         self._setup_ui()
-        self._fetch_datetime()
+        self._fetch_message_details()
         self._start_qrz()
+        self._update_nav_buttons()
 
     def _setup_ui(self) -> None:
         self.setStyleSheet(
@@ -2236,8 +2353,9 @@ class MessageDetailDialog(QDialog):
         main.setSpacing(8)
 
         self.qrz_info = _QRZInfoSection(hdr_bg=self._program_bg, hdr_fg=self._program_fg, parent=self)
-        self.contact_memo_edit = self.qrz_info.add_memo_row(trailing_space=0)
+        self.contact_memo_edit = self.qrz_info.add_memo_row()
         self.contact_memo_edit.editingFinished.connect(self._save_contact_memo)
+        self.qrz_info.add_message_rows()
         main.addWidget(self.qrz_info)
         main.addStretch(1)
 
@@ -2268,13 +2386,13 @@ class MessageDetailDialog(QDialog):
         self.btn_delete.clicked.connect(self._on_delete)
         btn_row.addWidget(self.btn_delete)
 
-        btn_newer = _btn("Next", _COL_NAV)
-        btn_newer.clicked.connect(self._on_newer)
-        btn_row.addWidget(btn_newer)
+        self.btn_older = _btn("Previous", _COL_NAV)
+        self.btn_older.clicked.connect(self._on_older)
+        btn_row.addWidget(self.btn_older)
 
-        btn_older = _btn("Previous", _COL_NAV)
-        btn_older.clicked.connect(self._on_older)
-        btn_row.addWidget(btn_older)
+        self.btn_newer = _btn("Next", _COL_NAV)
+        self.btn_newer.clicked.connect(self._on_newer)
+        btn_row.addWidget(self.btn_newer)
 
         self.btn_reply = _btn("Reply", COLOR_BTN_BLUE)
         self.btn_reply.clicked.connect(self._on_reply_clicked)
@@ -2332,19 +2450,70 @@ class MessageDetailDialog(QDialog):
         else:
             self.reject()
 
-    def _fetch_datetime(self) -> None:
+    def _fetch_message_details(self) -> None:
         if not self._msg_id:
+            self._populate_message_labels("", None, "", None)
             return
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT datetime FROM messages WHERE msg_id = ?", (self._msg_id,))
+                cur.execute(
+                    "SELECT datetime, freq, target, source FROM messages WHERE msg_id = ?",
+                    (self._msg_id,)
+                )
                 row = cur.fetchone()
-                self._msg_datetime = row[0] if row else ""
         except sqlite3.Error:
-            pass
+            row = None
+        if row:
+            self._msg_datetime = row[0] or ""
+            self._populate_message_labels(row[0] or "", row[1], row[2] or "", row[3])
+        else:
+            self._populate_message_labels(self._msg_datetime, None, "", None)
 
-    def _reload(self, msg_id: str, callsign: str, message_text: str, msg_datetime: str) -> None:
+    def _populate_message_labels(self, datetime_str: str, freq, target: str, source) -> None:
+        _k = "font-family:Roboto; font-weight:bold; font-size:13px;"
+        _source_map = {1: "RF via JS8Call", 2: "Internet", 3: "Internet Only"}
+
+        self.qrz_info.lbl_msg_posted.setText(
+            f'<span style="{_k}">Posted:</span>  {datetime_str}' if datetime_str
+            else f'<span style="{_k}">Posted:</span>'
+        )
+        self.qrz_info.lbl_msg_id.setText(
+            f'<span style="{_k}">Message ID:</span>  {self._msg_id}' if self._msg_id
+            else f'<span style="{_k}">Message ID:</span>'
+        )
+        target_text = ""
+        if target:
+            stripped = target.lstrip("@")
+            target_text = ("@" + stripped) if stripped else ""
+        self.qrz_info.lbl_msg_target.setText(
+            f'<span style="{_k}">To:</span>  {target_text}' if target_text
+            else f'<span style="{_k}">To:</span>'
+        )
+        try:
+            freq_mhz = (float(freq) / 1_000_000) if freq else 0.0
+        except (TypeError, ValueError):
+            freq_mhz = 0.0
+        self.qrz_info.lbl_msg_freq.setText(
+            f'<span style="{_k}">Freq:</span>  {freq_mhz:.3f} MHz' if freq_mhz
+            else f'<span style="{_k}">Freq:</span>'
+        )
+        if source is None:
+            self.qrz_info.lbl_msg_source.setText(f'<span style="{_k}">Received via:</span>')
+        else:
+            try:
+                source_text = _source_map.get(int(source), "Unknown")
+            except (TypeError, ValueError):
+                source_text = "Unknown"
+            self.qrz_info.lbl_msg_source.setText(
+                f'<span style="{_k}">Received via:</span>  {source_text}'
+            )
+
+    def _reload(self, msg_id: str, callsign: str, message_text: str, msg_datetime: str,
+                freq=None, target: str = "", source=None) -> None:
+        self._reload_token += 1
+        self.btn_newer.setEnabled(False)
+        self.btn_older.setEnabled(False)
         self._msg_id = msg_id
         self.callsign = callsign
         self.message_text = message_text
@@ -2357,6 +2526,7 @@ class MessageDetailDialog(QDialog):
         self.contact_memo_edit.clear()
         self.contact_memo_edit.blockSignals(False)
         self.qrz_info.update_data({"call": callsign})
+        self._populate_message_labels(msg_datetime, freq, target, source)
         if self._thread is not None:
             try:
                 self._thread.result_ready.disconnect()
@@ -2364,6 +2534,29 @@ class MessageDetailDialog(QDialog):
                 pass
             self._thread = None
         self._start_qrz()
+        self._update_nav_buttons()
+
+    def _update_nav_buttons(self) -> None:
+        has_newer = False
+        has_older = False
+        if self._msg_datetime:
+            try:
+                with sqlite3.connect(DB_PATH, timeout=10) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT 1 FROM messages WHERE datetime > ? LIMIT 1",
+                        (self._msg_datetime,)
+                    )
+                    has_newer = cur.fetchone() is not None
+                    cur.execute(
+                        "SELECT 1 FROM messages WHERE datetime < ? LIMIT 1",
+                        (self._msg_datetime,)
+                    )
+                    has_older = cur.fetchone() is not None
+            except sqlite3.Error:
+                pass
+        self.btn_newer.setEnabled(has_newer)
+        self.btn_older.setEnabled(has_older)
 
     def _on_newer(self) -> None:
         self._last_nav = "newer"
@@ -2375,19 +2568,20 @@ class MessageDetailDialog(QDialog):
 
     def _navigate(self, direction: str) -> None:
         if not self._msg_datetime:
+            self._update_nav_buttons()
             return
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 cur = conn.cursor()
                 if direction == "newer":
                     cur.execute(
-                        "SELECT msg_id, from_callsign, message, datetime FROM messages "
+                        "SELECT msg_id, from_callsign, message, datetime, freq, target, source FROM messages "
                         "WHERE datetime > ? ORDER BY datetime ASC LIMIT 1",
                         (self._msg_datetime,)
                     )
                 else:
                     cur.execute(
-                        "SELECT msg_id, from_callsign, message, datetime FROM messages "
+                        "SELECT msg_id, from_callsign, message, datetime, freq, target, source FROM messages "
                         "WHERE datetime < ? ORDER BY datetime DESC LIMIT 1",
                         (self._msg_datetime,)
                     )
@@ -2396,8 +2590,10 @@ class MessageDetailDialog(QDialog):
             print(f"[MessageDetailDialog] Navigate error: {e}")
             return
         if not row:
+            self._update_nav_buttons()
             return
-        self._reload(row[0], row[1] or "", row[2] or "", row[3] or "")
+        self._reload(row[0], row[1] or "", row[2] or "", row[3] or "",
+                     freq=row[4], target=row[5] or "", source=row[6])
 
     def _on_delete(self) -> None:
         deleted_dt = self._msg_datetime
@@ -2416,13 +2612,13 @@ class MessageDetailDialog(QDialog):
                     direction = self._last_nav
                     if direction == "newer":
                         cur.execute(
-                            "SELECT msg_id, from_callsign, message, datetime FROM messages "
+                            "SELECT msg_id, from_callsign, message, datetime, freq, target, source FROM messages "
                             "WHERE datetime > ? ORDER BY datetime ASC LIMIT 1",
                             (deleted_dt,)
                         )
                     else:
                         cur.execute(
-                            "SELECT msg_id, from_callsign, message, datetime FROM messages "
+                            "SELECT msg_id, from_callsign, message, datetime, freq, target, source FROM messages "
                             "WHERE datetime < ? ORDER BY datetime DESC LIMIT 1",
                             (deleted_dt,)
                         )
@@ -2434,7 +2630,8 @@ class MessageDetailDialog(QDialog):
         if not next_row:
             self.accept()
             return
-        self._reload(next_row[0], next_row[1] or "", next_row[2] or "", next_row[3] or "")
+        self._reload(next_row[0], next_row[1] or "", next_row[2] or "", next_row[3] or "",
+                     freq=next_row[4], target=next_row[5] or "", source=next_row[6])
 
     def _start_qrz(self) -> None:
         cached_fresh = get_qrz_cached(self.callsign)
@@ -2468,8 +2665,11 @@ class MessageDetailDialog(QDialog):
             return
 
         # No fresh cache (missing or stale) — live lookup; QRZClient handles stale refresh
+        token = self._reload_token
         self._thread = _QRZThread(self.callsign, username, password)
-        self._thread.result_ready.connect(self._on_qrz_result)
+        self._thread.result_ready.connect(
+            lambda result, t=token: self._on_qrz_result(result) if t == self._reload_token else None
+        )
         self._thread.start()
 
     def _on_qrz_result(self, result) -> None:

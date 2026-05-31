@@ -146,11 +146,13 @@ class JS8DirectMessageDialog(QDialog):
         self,
         tcp_pool: "TCPConnectionPool" = None,
         connector_manager: "ConnectorManager" = None,
+        refresh_callback=None,
         parent=None
     ):
         super().__init__(parent)
         self.tcp_pool = tcp_pool
         self.connector_manager = connector_manager
+        self.refresh_callback = refresh_callback
 
         self._current_freq_mhz = None
         self._pending_payload = ""
@@ -870,11 +872,13 @@ class JS8DirectMessageDialog(QDialog):
         # Stash transmit context so the JS8Call selection check can complete
         # the send when the response arrives.
         rig_name = self.rig_combo.currentText()
-        self._pending_payload = payload
-        self._pending_msg_id  = msg_id
-        self._pending_target  = target
-        self._pending_relay   = "(direct)" if direct else relay_cs
-        self._pending_rig     = rig_name
+        self._pending_payload      = payload
+        self._pending_msg_id       = msg_id
+        self._pending_target       = target
+        self._pending_relay        = "(direct)" if direct else relay_cs
+        self._pending_rig          = rig_name
+        self._pending_message_text = text
+        self._pending_freq_mhz     = self._current_freq_mhz
 
         # Mirror the StatRep / Group Message / Alert pattern: ask JS8Call
         # whether a call is currently selected. If yes, abort with the
@@ -886,6 +890,38 @@ class JS8DirectMessageDialog(QDialog):
             pass
         client.call_selected_received.connect(self._on_call_selected_for_transmit)
         client.get_call_selected()
+
+    def _save_to_local_messages(self, from_callsign: str) -> None:
+        """Write the just-transmitted direct message to the local messages
+        table so it shows up in the message log, mirroring group_message.py.
+
+        This dialog is RF-only (the Rig dropdown excludes INTERNET ONLY), so
+        source is always 1 (Radio). The recipient callsign is stored in the
+        target column — matching how received direct messages are stored (see
+        little_gucci.py _parse_message) — and our own station callsign in
+        from_callsign. db follows the group_message convention of 30 for a
+        locally-originated message. The message body retains its ||-encoded
+        newlines; the table display decodes them back to \\n.
+        """
+        now = QDateTime.currentDateTimeUtc()
+        datetime_str = now.toString("yyyy-MM-dd HH:mm:ss")
+        date_only    = now.toString("yyyy-MM-dd")
+        freq_hz = int(round(self._pending_freq_mhz * 1_000_000)) if self._pending_freq_mhz else 0
+        from_cs = (from_callsign or "").split("/")[0].strip().upper()
+
+        try:
+            with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO messages "
+                    "(datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (datetime_str, date_only, freq_hz, 30, 1,
+                     self._pending_msg_id, from_cs,
+                     self._pending_target, self._pending_message_text)
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            print(f"[JS8DirectMessage] failed to save message to local table: {e}")
 
     def _on_call_selected_for_transmit(self, rig_name: str, selected_call: str) -> None:
         """JS8Call response to RX.GET_CALL_SELECTED — proceed only if nothing
@@ -915,6 +951,10 @@ class JS8DirectMessageDialog(QDialog):
 
         try:
             client.send_tx_message(self._pending_payload)
+
+            self._save_to_local_messages(client.callsign)
+            if self.refresh_callback:
+                self.refresh_callback()
 
             now = QDateTime.currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss")
             print(f"\n{'='*60}")
