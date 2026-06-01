@@ -1369,6 +1369,7 @@ class StatRepDetailDialog(QDialog):
                  connector_manager=None,
                  record_list: list = None,
                  record_list_provider: Optional[Callable[[], list]] = None,
+                 refresh_callback=None,
                  parent=None):
         super().__init__(parent)
         self.setWindowFlags(
@@ -1405,6 +1406,7 @@ class StatRepDetailDialog(QDialog):
         self._last_nav: str = "older"
         self._record_list: list = list(record_list) if record_list else []
         self._record_list_provider = record_list_provider
+        self._refresh_callback = refresh_callback
         self._global_id = 0
         self._row_data: dict = {}
         self._sr_datetime: str = ""
@@ -1993,6 +1995,7 @@ class StatRepDetailDialog(QDialog):
             program_background=self._program_bg,
             program_foreground=self._program_fg,
             initial_callsign=self.callsign,
+            refresh_callback=self._refresh_callback,
             parent=self,
         )
         dlg.exec_()
@@ -2307,6 +2310,7 @@ class MessageDetailDialog(QDialog):
                  program_background: str = "",
                  program_foreground: str = "",
                  msg_id: str = "",
+                 refresh_callback=None,
                  parent=None):
         super().__init__(parent)
         self.setWindowFlags(
@@ -2326,6 +2330,7 @@ class MessageDetailDialog(QDialog):
         self._program_bg = program_background or _PROG_BG
         self._program_fg = program_foreground or _PROG_FG
         self._msg_id = msg_id
+        self._refresh_callback = refresh_callback
         self._thread: Optional[_QRZThread] = None
         self._reload_token: int = 0
         self._map_loaded = False
@@ -2426,6 +2431,7 @@ class MessageDetailDialog(QDialog):
             program_background=self._program_bg,
             program_foreground=self._program_fg,
             initial_callsign=self.callsign,
+            refresh_callback=self._refresh_callback,
             parent=self,
         )
         dlg.exec_()
@@ -2440,6 +2446,7 @@ class MessageDetailDialog(QDialog):
             program_foreground=self._program_fg,
             initial_callsign=self.callsign,
             initial_message=prefill,
+            refresh_callback=self._refresh_callback,
             parent=self,
         )
         dlg.exec_()

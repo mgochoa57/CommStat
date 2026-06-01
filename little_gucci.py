@@ -2470,7 +2470,7 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setFixedHeight(18)
             btn.setFixedWidth(70)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(f"background-color: {menu_bg}; color: {menu_fg};")
+            btn.setStyleSheet(f"background-color: {menu_bg}; color: {menu_fg}; border: none; border-radius: 4px; padding: 2px 10px;")
             btn.clicked.connect(lambda checked, u=url: QDesktopServices.openUrl(QUrl(u)))
             self.statusbar.addWidget(btn)
 
@@ -4544,6 +4544,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                     tcp_pool=self.tcp_pool,
                     connector_manager=self.connector_manager,
                     record_list_provider=build_record_list,
+                    refresh_callback=self._load_message_data,
                     parent=self
                 )
                 dlg.pin_changed.connect(
@@ -4582,6 +4583,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                     program_background=self.config.get_color('program_background'),
                     program_foreground=self.config.get_color('program_foreground'),
                     msg_id=msg_id,
+                    refresh_callback=self._load_message_data,
                     parent=self
                 )
                 dlg.record_deleted.connect(self._load_message_data)
