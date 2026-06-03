@@ -96,7 +96,7 @@ def _btn(label: str, color: str, min_w: int = 90) -> QPushButton:
     b.setMinimumWidth(min_w)
     b.setStyleSheet(
         f"QPushButton {{ background-color:{color}; color:#ffffff; border:none;"
-        f" padding:6px 14px; border-radius:4px; font-family:Roboto; font-size:15px;"
+        f" padding:6px 11px; border-radius:4px; font-family:Roboto; font-size:15px;"
         f" font-weight:bold; }}"
         f"QPushButton:hover {{ background-color:{color}; opacity:0.9; }}"
         f"QPushButton:pressed {{ background-color:{color}; }}"
@@ -1492,7 +1492,7 @@ class StatRepDetailDialog(QDialog):
 
         self.pin_toggle = _ToggleSwitch()
         self.pin_toggle.toggled.connect(self._save_pinned)
-        self.lbl_pin = QLabel("Pinned")
+        self.lbl_pin = QLabel("Pin")
         self.lbl_pin.setFont(_lbl_font())
         btn_row.addWidget(self.pin_toggle)
         btn_row.addWidget(self.lbl_pin)
@@ -1509,6 +1509,10 @@ class StatRepDetailDialog(QDialog):
         self.btn_newer = _btn("Next", _COL_NAV)
         self.btn_newer.clicked.connect(self._on_newer)
         btn_row.addWidget(self.btn_newer)
+
+        self.btn_reply_sr = _btn("Reply", COLOR_BTN_BLUE)
+        self.btn_reply_sr.clicked.connect(self._on_reply_clicked)
+        btn_row.addWidget(self.btn_reply_sr)
 
         self.btn_message_sr = _btn("Message", COLOR_BTN_BLUE)
         self.btn_message_sr.clicked.connect(self._on_message_clicked)
@@ -1987,6 +1991,21 @@ class StatRepDetailDialog(QDialog):
                 v.deleteLater()
             except Exception:
                 pass
+
+    def _on_reply_clicked(self) -> None:
+        original = (self._row_data.get("comments") or "").replace("||", "\n")
+        prefill = "\n\n----------\n" + original
+        dlg = QRZLookupDialog(
+            module_background=self._module_bg,
+            module_foreground=self._module_fg,
+            program_background=self._program_bg,
+            program_foreground=self._program_fg,
+            initial_callsign=self.callsign,
+            initial_message=prefill,
+            refresh_callback=self._refresh_callback,
+            parent=self,
+        )
+        dlg.exec_()
 
     def _on_message_clicked(self) -> None:
         dlg = QRZLookupDialog(
