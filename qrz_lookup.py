@@ -773,6 +773,7 @@ class QRZLookupDialog(QDialog):
         self._program_fg = program_foreground or _PROG_FG
         self._thread: Optional[_QRZThread] = None
         self._refresh_callback = refresh_callback
+        self._internet_available = bool(self.parent() and getattr(self.parent(), '_internet_available', True))
         self._send_result.connect(self._on_send_result)
         self._setup_ui()
 
@@ -855,24 +856,38 @@ class QRZLookupDialog(QDialog):
         _fm = QFontMetrics(self.msg_edit.font())
         self.msg_edit.setFixedHeight(_fm.lineSpacing() * 6 + 14)
         self.msg_edit.textChanged.connect(self._on_msg_changed)
+        if not self._internet_available:
+            self.msg_edit.setEnabled(False)
         main.addWidget(self.msg_edit)
         main.addStretch()
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        btn_row.addStretch()
         self.btn_clear_msg = _btn("Clear", _COL_CANCEL)
         self.btn_clear_msg.setVisible(False)
         self.btn_clear_msg.clicked.connect(self.msg_edit.clear)
-        btn_row.addWidget(self.btn_clear_msg)
         self.btn_send = _btn("Send", COLOR_BTN_BLUE)
         self.btn_send.setVisible(False)
         self.btn_send.clicked.connect(self._on_send_internet)
-        btn_row.addWidget(self.btn_send)
         self.btn_close_lookup = _btn("Close", _COL_CANCEL)
         self.btn_close_lookup.clicked.connect(self.reject)
-        btn_row.addWidget(self.btn_close_lookup)
-        main.addLayout(btn_row)
+
+        if self._internet_available:
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+            btn_row.addStretch()
+            btn_row.addWidget(self.btn_clear_msg)
+            btn_row.addWidget(self.btn_send)
+            btn_row.addWidget(self.btn_close_lookup)
+            main.addLayout(btn_row)
+        else:
+            no_inet = QLabel("No Internet Connection  ·  Direct Messaging Unavailable")
+            no_inet.setAlignment(Qt.AlignCenter)
+            no_inet.setFont(QFont("Roboto Slab", -1, QFont.Black))
+            no_inet.setFixedHeight(36)
+            no_inet.setStyleSheet(
+                f"QLabel {{ background-color: {self._program_bg}; color: {self._program_fg}; "
+                "font-size: 16px; padding-top: 9px; padding-bottom: 9px; }}"
+            )
+            main.addWidget(no_inet)
 
     def _adjust_for_image_width(self, img_width: int) -> None:
         if img_width > 275:
@@ -973,6 +988,8 @@ class QRZLookupDialog(QDialog):
             print(f"[QRZLookupDialog] Memo save error: {e}")
 
     def _on_msg_changed(self) -> None:
+        if not self._internet_available:
+            return
         has_text = bool(self.msg_edit.toPlainText().strip())
         self.btn_clear_msg.setVisible(has_text)
         self.btn_send.setVisible(has_text)

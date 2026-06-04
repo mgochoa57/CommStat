@@ -242,15 +242,9 @@ class JS8SMSDialog(QDialog):
 
         connected_rigs = self.tcp_pool.get_connected_rig_names()
 
-        if not connected_rigs:
-            all_rigs = self.tcp_pool.get_all_rig_names()
-            if all_rigs:
-                self.rig_combo.addItem("")
-                for rig_name in all_rigs:
-                    self.rig_combo.addItem(f"{rig_name} (disconnected)")
-        elif len(connected_rigs) == 1:
+        if len(connected_rigs) == 1:
             self.rig_combo.addItem(connected_rigs[0])
-        else:
+        elif connected_rigs:
             self.rig_combo.addItem("")
             for rig_name in connected_rigs:
                 self.rig_combo.addItem(rig_name)
@@ -258,7 +252,7 @@ class JS8SMSDialog(QDialog):
         self.rig_combo.blockSignals(False)
 
         current_text = self.rig_combo.currentText()
-        if current_text and "(disconnected)" not in current_text:
+        if current_text:
             self._on_rig_changed(current_text)
 
     def closeEvent(self, event) -> None:

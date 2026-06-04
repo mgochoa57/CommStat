@@ -2277,7 +2277,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for name, text, handler in [
             ("statrep",      "Status Report",        self._on_statrep),
             ("send_message", "Group Message",         self._on_send_message),
-            ("group_alert",  "Group/Callsign Alert",  self._on_group_alert),
+            ("group_alert",  "Alert",                 self._on_group_alert),
         ]:
             action = QtWidgets.QAction(text, self)
             action.triggered.connect(handler)
@@ -2774,6 +2774,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.alert_message_label = QtWidgets.QLabel()
         self.alert_message_label.setAlignment(Qt.AlignCenter)
         self.alert_message_label.setWordWrap(True)
+        self.alert_message_label.setTextFormat(Qt.RichText)
+        self.alert_message_label.setOpenExternalLinks(True)
         # Message uses Roboto (clean sans-serif for readability)
         message_font = QtGui.QFont("Roboto", 18)
         self.alert_message_label.setFont(message_font)
@@ -3010,7 +3012,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.alert_message_label.setStyleSheet(f"color: {text_color}; font-family: Roboto;")
             self.alert_date_label.setStyleSheet(f"color: {text_color}; font-family: Roboto;")
             self.alert_title_label.setText(formatted_title)
-            self.alert_message_label.setText(message)
+            _parts = re.split(r'(https?://\S+)', message)
+            _msg_html = "".join(
+                f'<a href="{p.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}"'
+                f' style="color:#00FF00;">'
+                f'{p.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}</a>'
+                if i % 2 else
+                p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                for i, p in enumerate(_parts)
+            )
+            self.alert_message_label.setText(_msg_html)
             self.alert_date_label.setText(date_line)
         else:
             # No alerts - show placeholder

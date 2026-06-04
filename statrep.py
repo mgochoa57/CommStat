@@ -357,15 +357,19 @@ class StatRepDialog(QDialog):
         available_connectors = [c for c in enabled_connectors if c['rig_name'] in connected_rigs]
         available_count = len(available_connectors)
 
+        internet_available = bool(self.parent() and getattr(self.parent(), '_internet_available', False))
+
         if available_count == 0:
-            # No available connectors — Internet is the only/preselected option
-            self.rig_combo.addItem(INTERNET_RIG)
+            # No available connectors — Internet only if online
+            if internet_available:
+                self.rig_combo.addItem(INTERNET_RIG)
         else:
-            # Connectors available — require explicit selection; Internet at bottom
+            # Connectors available — require explicit selection; Internet at bottom if online
             self.rig_combo.addItem("")  # empty first
             for c in available_connectors:
                 self.rig_combo.addItem(c['rig_name'])
-            self.rig_combo.addItem(INTERNET_RIG)
+            if internet_available:
+                self.rig_combo.addItem(INTERNET_RIG)
 
         self.rig_combo.blockSignals(False)
 

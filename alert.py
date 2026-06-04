@@ -301,13 +301,17 @@ class AlertDialog(QDialog):
         connected_rigs     = self.tcp_pool.get_connected_rig_names() if self.tcp_pool else []
         available          = [c for c in enabled_connectors if c['rig_name'] in connected_rigs]
 
+        internet_available = bool(self.parent() and getattr(self.parent(), '_internet_available', False))
+
         if not available:
-            self.rig_combo.addItem(INTERNET_RIG)
+            if internet_available:
+                self.rig_combo.addItem(INTERNET_RIG)
         else:
             self.rig_combo.addItem("")
             for c in available:
                 self.rig_combo.addItem(c['rig_name'])
-            self.rig_combo.addItem(INTERNET_RIG)
+            if internet_available:
+                self.rig_combo.addItem(INTERNET_RIG)
 
         self.rig_combo.blockSignals(False)
 
