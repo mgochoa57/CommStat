@@ -13,7 +13,7 @@ from typing import Dict
 # Application Identity
 # =============================================================================
 
-VERSION = "4.2.6"
+VERSION = "4.2.7"
 
 WINDOW_TITLE = f"CommStat (v{VERSION}) by N0DDK"
 WINDOW_SIZE = (1360, 768)

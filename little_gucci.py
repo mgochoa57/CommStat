@@ -2403,6 +2403,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("World Internet Outages", "internet_outages",  "https://radar.cloudflare.com/outage-center"),
             ("US Power Outages",       "power_outages",     "https://poweroutage.us/"),
             ("USGS Earthquakes",       "usgs_earthquakes",  "https://earthquake.usgs.gov/earthquakes/map/"),
+            ("Wildfire Map",           "wildfire_map",      "https://wildfiretrackers.com/"),
             ("Real-Time Lightning",    "lightning_map",     "https://www.lightningmaps.org/"),
         ]:
             create_action(
@@ -6050,11 +6051,8 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                     user_callsigns = [local_callsign.upper()]
             if alert_target.upper() not in user_callsigns:
                 return ("", None)
-        elif alert_target.upper() == "@COMMSTAT":
-            # @COMMSTAT is a broadcast to everyone — store as @COMMSTAT
-            alert_target = "@COMMSTAT"
         else:
-            # Standard @GROUP — only save if we're a member of that group (active or not)
+            # @GROUP — only save if we're a member of that group (active or not)
             group_name = alert_target[1:].upper()
             all_groups = self.db.get_all_groups()
             if group_name not in all_groups:
@@ -6155,13 +6153,12 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
 
         # Check if message is to a group we're in or to one of our callsigns
         if msg_target.startswith("@"):
-            # Group message - always accept @COMMSTAT; otherwise check membership
+            # Group message - only save if we're a member of that group
             group_name = msg_target[1:].upper()  # Remove @ and normalize
-            if group_name != "COMMSTAT":
-                all_groups = self.db.get_all_groups()
-                if group_name not in all_groups:
-                    # Skip messages to groups we're not in
-                    return ("", None)
+            all_groups = self.db.get_all_groups()
+            if group_name not in all_groups:
+                # Skip messages to groups we're not in
+                return ("", None)
         else:
             # Direct message - only save if to one of our callsigns
             target_call = msg_target.upper()
@@ -6384,13 +6381,10 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             user_callsign, _, __ = self.db.get_user_settings()
         is_to_user = to_call.split("/")[0].upper() == user_callsign.upper() if user_callsign else False
 
-        # Group check: @COMMSTAT always accepted; other groups only if in our groups list
+        # Group check: groups accepted only if in our groups list
         if to_call.startswith("@"):
-            if to_call.upper() == "@COMMSTAT":
-                is_to_group = True
-            else:
-                group_name = to_call[1:].upper()
-                is_to_group = group_name in self.db.get_all_groups()
+            group_name = to_call[1:].upper()
+            is_to_group = group_name in self.db.get_all_groups()
         else:
             is_to_group = False
 
