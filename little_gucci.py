@@ -147,10 +147,10 @@ SOLAR_IMAGE_DIALOGS = [
 
 # Live weather map links opened in the user's browser from the Tools menu.
 WEATHER_MAP_LINKS = [
+    ("Nat'l Weather Service", "https://www.weather.gov/"),
+    ("Ventusky", "https://www.ventusky.com/"),
     ("Windy.com", "https://www.windy.com/"),
     ("Zoom Earth", "https://zoom.earth/"),
-    ("Ventusky", "https://www.ventusky.com/"),
-    ("Nat'l Weather Service", "https://www.weather.gov/"),
 ]
 
 
@@ -2430,11 +2430,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tools_menu.addSeparator()
         create_action(self.tools_menu, "Live Radiation Map", "live_radiation_map", self._on_live_radiation_map)
         for label, key, url in [
-            ("World Internet Outages", "internet_outages",  "https://radar.cloudflare.com/outage-center"),
+            ("Real-Time Lightning",    "lightning_map",     "https://www.lightningmaps.org/"),
             ("US Power Outages",       "power_outages",     "https://poweroutage.us/"),
             ("USGS Earthquakes",       "usgs_earthquakes",  "https://earthquake.usgs.gov/earthquakes/map/"),
             ("Wildfire Map",           "wildfire_map",      "https://wildfiretrackers.com/"),
-            ("Real-Time Lightning",    "lightning_map",     "https://www.lightningmaps.org/"),
+            ("World Internet Outages", "internet_outages",  "https://radar.cloudflare.com/outage-center"),
         ]:
             create_action(
                 self.tools_menu, label, key,
@@ -2451,10 +2451,10 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
         self.tools_menu.addSeparator()
-        create_action(self.tools_menu, "QRZ Contacts", "qrz_contacts", self._on_qrz_contacts_menu)
-        create_action(self.tools_menu, "Grid Finder", "grid_finder", self._on_grid_finder)
         create_action(self.tools_menu, "Brevity", "brevity", self._on_brevity_generator)
+        create_action(self.tools_menu, "Grid Finder", "grid_finder", self._on_grid_finder)
         create_action(self.tools_menu, "Large Map...", "large_map", self._on_large_map)
+        create_action(self.tools_menu, "QRZ Contacts", "qrz_contacts", self._on_qrz_contacts_menu)
 
         # Menubar items
         create_action(self.menubar, "QRZ", "qrz_lookup", self._on_qrz_lookup)
