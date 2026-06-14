@@ -1620,9 +1620,13 @@ class StatRepDetailDialog(QDialog):
         )
         self.qrz_info.lbl_sr_delivered.setText(f'<span style="{_k}">Delivered To:</span>')
 
+        self.qrz_info._skip_last_seen = False
         if global_id and self._commsrvr_url and self.internet_available:
             local_cs = _get_local_callsign()
             if local_cs:
+                # get-read-count returns both the delivered count and last-seen
+                # ("115,50 seconds ago"), so skip the redundant standalone last-seen call.
+                self.qrz_info._skip_last_seen = True
                 rc_token = self._reload_token
                 self._rc_thread = _ReadCountThread(self._commsrvr_url, local_cs, global_id)
                 self._rc_thread.count_ready.connect(
@@ -1666,9 +1670,14 @@ class StatRepDetailDialog(QDialog):
     def _on_read_count(self, text: str) -> None:
         if not text:
             return
-        count_str = text.split(",", 1)[0].strip()
+        # Response carries both values, e.g. "115,50 seconds ago"
+        # (delivered count before the comma, last-seen after).
+        parts = text.split(",", 1)
+        count_str = parts[0].strip()
+        last_seen_str = parts[1].strip() if len(parts) > 1 else ""
         _k = "font-family:Roboto; font-weight:bold; font-size:13px;"
         self.qrz_info.lbl_sr_delivered.setText(f'<span style="{_k}">Delivered To:</span>  {count_str} CommStat users')
+        self.qrz_info._on_last_seen_updated(last_seen_str if last_seen_str else "—")
 
     def _save_pinned(self, checked: bool) -> None:
         """Save pinned state to the database and notify the main window."""

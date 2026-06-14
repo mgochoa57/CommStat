@@ -76,7 +76,8 @@ DEFAULT_COLORS: Dict[str, str] = {
     'time_foreground': '#FFFF00',
     # StatRep condition indicators (traffic light)
     'condition_green': '#28A745',          # Good / normal
-    'condition_yellow': '#FFFF77',         # Caution / degraded
+    #'condition_yellow': '#FFFF77',         # Caution / degraded
+    'condition_yellow': '#FFDC78',         # Caution / degraded
     'condition_red': '#DC3534',            # Critical / emergency
     'condition_gray': '#6C757D',           # Unknown / no data
     # Data tables

@@ -104,6 +104,20 @@ _PING = _COMMSRVR + "/heartbeat-808585.php"
 # allowed — otherwise every wheel tick rounds up to a full zoom level.
 MAP_WHEEL_PX_PER_ZOOM = 360
 
+# Bottom-left map pin sizing. Pin COLOR conveys status (green/orange/red);
+# pin RADIUS conveys the StatRep's scope (how local the report is). Values are
+# CircleMarker pixel radii, so on-screen diameter is 2x these numbers. Keys match
+# the scope strings stored in the DB (see SCOPE_MAP in map_f301_digits_to_fields).
+SCOPE_RADIUS = {
+    "My Location":     4,
+    "My Community":    7,
+    "My County":      10,
+    "My Region":      13,
+    "Other Location": 5,
+}
+# Fallback radius for an unknown/missing scope (treated like My Location).
+SCOPE_RADIUS_DEFAULT = 4
+
 # Contacts capture (Direct Message Part 1):
 #  - The sender of the RX.DIRECTED (from_call) is the RELAY — the station we
 #    directly heard. The callsign parsed out of the body is the TARGET —
@@ -2247,9 +2261,17 @@ class MainWindow(QtWidgets.QMainWindow):
             }}
         """)
 
+        # Section headers throughout the menus are disabled QActions; style them
+        # bold with the menu background/foreground colors. In each of these menus
+        # the disabled items are exclusively section titles.
+        section_header_qss = (
+            f"QMenu::item:disabled {{ background-color: {menu_bg}; color: {menu_fg}; font-weight: bold; }}"
+        )
+
         # Create the main menu
         self.menu = _MenuBarMenu("Config", self.menubar)
         self.menubar.addMenu(self.menu)
+        self.menu.setStyleSheet(section_header_qss)
 
         # Define menu actions: (name, text, handler)
         menu_items = [
@@ -2272,21 +2294,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.groups_menu = self.menu
         self.groups_menu.addSeparator()
 
+        # ALERTS & MESSAGES section (moved here from the Filter menu)
+        alerts_messages_label = QtWidgets.QAction("Alerts && Messages", self)
+        alerts_messages_label.setEnabled(False)  # Disabled as a section title
+        self.menu.addAction(alerts_messages_label)
+
+        self.save_all_alerts_checkbox = self._create_menu_checkbox(
+            self.menu, "Save all Alerts",
+            self.config.get_save_all_alerts(), self._on_toggle_save_all_alerts)
+
+        self.save_all_messages_checkbox = self._create_menu_checkbox(
+            self.menu, "Save all Messages",
+            self.config.get_save_all_messages(), self._on_toggle_save_all_messages)
+
+        alerts_messages_help = QtWidgets.QAction("Help", self)
+        alerts_messages_help.triggered.connect(self._on_alerts_messages_help)
+        self.menu.addAction(alerts_messages_help)
+
         # Populate group checkboxes (will be called after menu setup)
         # Deferred to after db initialization in __init__
 
         # Create the Transmit menu
         self.transmit_menu = _MenuBarMenu("Transmit", self.menubar)
         self.menubar.addMenu(self.transmit_menu)
-        # Section headers throughout the menus are disabled QActions; style them
-        # bold with the menu background/foreground colors. In each of these menus
-        # the disabled items are exclusively section titles.
-        section_header_qss = (
-            f"QMenu::item:disabled {{ background-color: {menu_bg}; color: {menu_fg}; font-weight: bold; }}"
-        )
         self.transmit_menu.setStyleSheet(section_header_qss)
 
-        hybrid_lbl = QtWidgets.QAction("HYBRID TOOLS", self)
+        hybrid_lbl = QtWidgets.QAction("Hybrid Tools", self)
         hybrid_lbl.setEnabled(False)
         self.transmit_menu.addAction(hybrid_lbl)
 
@@ -2301,7 +2334,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions[name] = action
 
         self.transmit_menu.addSeparator()
-        internet_lbl = QtWidgets.QAction("INTERNET TOOLS", self)
+        internet_lbl = QtWidgets.QAction("Internet Tools", self)
         internet_lbl.setEnabled(False)
         self.transmit_menu.addAction(internet_lbl)
 
@@ -2311,7 +2344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions["internet_message"] = inet_msg_action
 
         self.transmit_menu.addSeparator()
-        section_lbl = QtWidgets.QAction("GRID DOWN TOOLS", self)
+        section_lbl = QtWidgets.QAction("Grid Down Tools", self)
         section_lbl.setEnabled(False)
         self.transmit_menu.addAction(section_lbl)
 
@@ -2333,7 +2366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Helper to create styled menu checkboxes
 
         # DATE FILTERING section
-        date_filter_label = QtWidgets.QAction("DATE FILTERING", self)
+        date_filter_label = QtWidgets.QAction("Date Filtering", self)
         date_filter_label.setEnabled(False)  # Disabled as a section title
         self.filter_menu.addAction(date_filter_label)
 
@@ -2349,7 +2382,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # LIVE FEED section
         self.filter_menu.addSeparator()
-        live_feed_label = QtWidgets.QAction("LIVE FEED", self)
+        live_feed_label = QtWidgets.QAction("Live Feed", self)
         live_feed_label.setEnabled(False)  # Disabled as a section title
         self.filter_menu.addAction(live_feed_label)
 
@@ -2361,23 +2394,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.filter_menu, "Hide Live Feed",
             False, self._on_toggle_hide_live_feed)
 
-        # ALERTS & MESSAGES section
-        self.filter_menu.addSeparator()
-        alerts_messages_label = QtWidgets.QAction("ALERTS & MESSAGES", self)
-        alerts_messages_label.setEnabled(False)  # Disabled as a section title
-        self.filter_menu.addAction(alerts_messages_label)
-
-        self.save_all_alerts_checkbox = self._create_menu_checkbox(
-            self.filter_menu, "Save all Alerts",
-            self.config.get_save_all_alerts(), self._on_toggle_save_all_alerts)
-
-        self.save_all_messages_checkbox = self._create_menu_checkbox(
-            self.filter_menu, "Save all Messages",
-            self.config.get_save_all_messages(), self._on_toggle_save_all_messages)
-
         # STATREP & MESSAGES section
         self.filter_menu.addSeparator()
-        statrep_messages_label = QtWidgets.QAction("STATUS REPORTS", self)
+        statrep_messages_label = QtWidgets.QAction("Status Reports", self)
         statrep_messages_label.setEnabled(False)  # Disabled as a section title
         self.filter_menu.addAction(statrep_messages_label)
 
@@ -2420,7 +2439,7 @@ class MainWindow(QtWidgets.QMainWindow):
             menu.addAction(header)
 
         # WEATHER MAPS section - browser links
-        add_section_header(self.tools_menu, "WEATHER MAPS")
+        add_section_header(self.tools_menu, "Weather Maps")
         for label, url in WEATHER_MAP_LINKS:
             create_action(
                 self.tools_menu, label, "weather_" + label.lower().replace(" ", "_").replace(".", "_"),
@@ -4348,6 +4367,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 callsign = row[3]   # from_callsign
                 srid = row[5]       # sr_id (display only)
                 grid = row[6]       # grid
+                scope = row[7]      # scope (text); drives pin radius
                 status = str(row[8])  # map (status)
                 statrep_id = row[22]  # database primary key (unique)
 
@@ -4395,19 +4415,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     if not (US_BBOX[0] <= lat <= US_BBOX[1] and US_BBOX[2] <= lon <= US_BBOX[3]):
                         region_counts["world"] += 1
 
-                    # Determine pin color and size
+                    # Color conveys status; radius conveys scope.
                     if status == "1":
                         color = "green"
-                        radius = 5
                     elif status == "2":
                         color = "orange"
-                        radius = 10
                     elif status == "3":
                         color = "red"
-                        radius = 10
                     else:
                         color = "black"
-                        radius = 5
+
+                    radius = SCOPE_RADIUS.get(scope, SCOPE_RADIUS_DEFAULT)
 
                     folium.CircleMarker(
                         radius=radius,
@@ -5155,6 +5173,12 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         """Save all incoming group messages, not just those for groups in the local table."""
         self.config.set_save_all_messages(checked)
 
+    def _on_alerts_messages_help(self) -> None:
+        """Explain the 'Save all Alerts' / 'Save all Messages' checkboxes."""
+        Cls = self._resolve_dialog_class("help", "AlertsMessagesHelpDialog")
+        dlg = Cls(self)
+        dlg.exec_()
+
     def _on_toggle_hide_live_feed(self, checked: bool) -> None:
         """Hide/show the live feed. Session-only — resets on restart."""
         self._hide_live_feed = checked
@@ -5451,8 +5475,11 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
 
     def _populate_groups_menu(self) -> None:
         """Remove any stale group label actions from the Config menu."""
+        # Indices 0-9 are the permanent Config items (settings actions, the
+        # Alerts & Messages section with its two checkboxes, and the Help item);
+        # anything beyond is a stale group label to strip.
         actions = self.groups_menu.actions()
-        for action in actions[8:]:
+        for action in actions[10:]:
             self.groups_menu.removeAction(action)
 
     def _populate_filter_groups_menu(self) -> None:
@@ -5811,6 +5838,21 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                             self._load_statrep_data()
                             if not self.config.get_show_alerts():
                                 self._save_map_position(callback=self._load_map)
+                else:
+                    # Bare conversational group/direct message (no MSG keyword) —
+                    # Radio only. e.g. "KG4AQH: @AMRRON  ANYBODY NEED THE AIB...".
+                    # Routed straight to _parse_group_message (not through the
+                    # _process_directed_message membership gate) so "Save all
+                    # Messages" can capture groups we are not a member of.
+                    _pp = self._preprocess_message_value(value, from_call)
+                    _from_base = from_call.split("/")[0] if from_call else ""
+                    _utc_db = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    _dial_freq = freq - offset if freq else 0
+                    _gm_type, _ = self._parse_group_message(
+                        rig_name, _pp, _from_base, "", _dial_freq, snr, _utc_db, source=1
+                    )
+                    if _gm_type == "message":
+                        self._load_message_data()
 
     def _add_to_feed(self, line: str, rig_name: str) -> None:
         """
@@ -6235,6 +6277,97 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
 
         return ("", None)
 
+    def _parse_group_message(
+        self,
+        rig_name: str,
+        message_value: str,
+        from_callsign: str,
+        target: str,
+        freq: int,
+        snr: int,
+        utc: str,
+        source: int
+    ) -> tuple:
+        """
+        Final-fallback parser for Radio (TCP) traffic that matched none of the
+        earlier patterns. Captures bare conversational net check-ins of the form:
+
+            [CALLSIGN: ]@GROUP <text>      -> save if group is in the groups table
+                                              or "Save all Messages" is enabled
+            [CALLSIGN: ]YOURCALL <text>    -> save (directed to one of our callsigns)
+
+        where <text> (after the target token, leading whitespace stripped) is
+        longer than 17 characters. These carry no msg_id, so a minute-resolution
+        one is generated. Radio only (source == 1) — Internet bare-group messages
+        are already handled by _parse_message's source==2 fallback.
+
+        Returns:
+            ("message", None) on insert, ("", None) otherwise.
+        """
+        import re
+
+        # Radio only — Internet is handled by _parse_message's source==2 fallback
+        if source != 1:
+            return ("", None)
+
+        # [CALLSIGN: ] TARGET <text>  — leading callsign prefix is optional
+        m = re.match(r'^(?:\w+:\s+)?(@?\w+)\s+(.+)$', message_value, re.IGNORECASE)
+        if not m:
+            return ("", None)
+
+        msg_target = m.group(1).strip()
+        rest = m.group(2).strip()
+
+        # Skip anything carrying a CommStat structured marker (statrep {&%}/{F%},
+        # alert {%%}, message {^%}, or F!304/F!301). On the RX.DIRECTED path the
+        # priority chain consumes these before us, but the RX.ACTIVITY path routes
+        # here directly — so guard against misfiling them as conversational text.
+        if re.search(r'\{[&%^F]%3?\}', message_value) or "F!304" in message_value or "F!301" in message_value:
+            return ("", None)
+
+        # Length gate: only substantive messages (drops short check-ins like "CK IN HOUSTON")
+        if len(rest) <= 17:
+            return ("", None)
+
+        # Save criteria — same policy as _parse_message
+        if msg_target.startswith("@"):
+            # Group message — save if we're a member, unless "Save all Messages" is on
+            if not self.config.get_save_all_messages():
+                group_name = msg_target[1:].upper()
+                if group_name not in self.db.get_all_groups():
+                    return ("", None)
+        else:
+            # Bare callsign target — only save if it's one of our callsigns
+            user_callsigns = [c.upper() for c in self.rig_callsigns.values() if c]
+            if not user_callsigns:
+                settings_callsign, _, __ = self.db.get_user_settings()
+                if settings_callsign:
+                    user_callsigns = [settings_callsign.upper()]
+            if msg_target.upper() not in user_callsigns:
+                return ("", None)
+
+        date_only, msg_id = parse_message_datetime(utc)
+
+        data = {
+            'datetime': utc,
+            'date': date_only,
+            'freq': freq,
+            'db': snr,
+            'source': source,
+            'msg_id': msg_id,
+            'from_callsign': from_callsign,
+            'target': msg_target,
+            'message': rest
+        }
+
+        result = self._insert_message_data(
+            rig_name, "messages", data, "msg_id", "message", from_callsign
+        )
+        if result:
+            return (result, None)
+
+        return ("", None)
+
     def _process_relay_message(
         self,
         rig_name: str,
@@ -6371,9 +6504,20 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             )
 
         # PRIORITY 5: MESSAGE
-        return self._parse_message(
+        result = self._parse_message(
             rig_name, message_value, from_callsign, target, freq, snr, utc, source
         )
+        if result[0]:
+            return result
+
+        # PRIORITY 6: Radio-only bare group/direct message (final fallback).
+        # Runs only after every structured pattern above has declined.
+        if source == 1:
+            return self._parse_group_message(
+                rig_name, message_value, from_callsign, target, freq, snr, utc, source
+            )
+
+        return ("", None)
 
     def _process_directed_message(
         self,
@@ -6430,8 +6574,17 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         else:
             is_to_group = False
 
-        # Only process if to our group OR to our callsign
+        # Only process if to our group OR to our callsign.
+        # Exception: an @group we're not a member of can still be captured by the
+        # bare-message fallback when "Save all Messages" is on (mirrors the
+        # RX.ACTIVITY path, which routes to _parse_group_message directly). This
+        # only applies the conversational fallback — alerts/statreps to non-member
+        # groups remain gated out.
         if not (is_to_group or is_to_user):
+            if to_call.startswith("@") and self.config.get_save_all_messages():
+                return self._parse_group_message(
+                    rig_name, value, from_callsign, target, freq, snr, utc, source=1
+                )[0]
             return ""
 
         # For direct-callsign messages, store the recipient callsign as target
