@@ -595,6 +595,24 @@ def create_insecure_ssl_context():
     return ssl_context
 
 
+def create_verified_ssl_context():
+    """Create a cert-VERIFYING SSL context for the commsrvr heartbeat channel.
+
+    Unlike RSS (create_insecure_ssl_context), the heartbeat reply can drive
+    _handle_db_update (runs server-supplied SQL) and _handle_program_update
+    (downloads + installs a zip), so verification must stay ON to prevent MITM.
+
+    We prefer certifi's bundle when available so a stale OS/Python trust store
+    isn't a silent failure point (commstat.app uses a Let's Encrypt cert whose
+    ISRG root may be missing on un-updated machines).
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 # =============================================================================
 # Tile Scheme Handler for Map
 # =============================================================================
@@ -1719,6 +1737,14 @@ class DatabaseManager:
             )
             return cursor.fetchall()
         return self._execute(op, [])
+
+    def delete_qrz_contact(self, callsign: str) -> bool:
+        """Delete a single QRZ cached contact by callsign."""
+        def op(cursor, conn):
+            cursor.execute("DELETE FROM qrz WHERE callsign = ?", (callsign,))
+            conn.commit()
+            return cursor.rowcount > 0
+        return self._execute(op, False)
 
     def set_user_settings(self, callsign: str, grid: str, state: str) -> bool:
         """Save user callsign, grid square, and state to controls table."""
@@ -3142,11 +3168,17 @@ class MainWindow(QtWidgets.QMainWindow):
             # Build heartbeat URL with callsign, data_id, qrz_id, db_version, and build_number parameters
             heartbeat_url = f"{_PING}?cs={callsign}&id={data_id}&qrz={qrz_value}&db={db_version}&build={build_number}"
 
-            with urllib.request.urlopen(heartbeat_url, timeout=10) as response:
+            # Send an explicit User-Agent (some WAFs 403 the default Python-urllib UA)
+            # and verify the cert via certifi so a stale trust store fails loudly, not silently.
+            request = urllib.request.Request(heartbeat_url, headers={'User-Agent': 'CommStat/2.5'})
+            with urllib.request.urlopen(request, timeout=10, context=create_verified_ssl_context()) as response:
                 content = response.read().decode('utf-8')
 
             return content.strip() or None
-        except Exception:
+        except Exception as e:
+            # Never silent: this path was previously a black hole, making field
+            # diagnosis (e.g. TLS cert-verification failures) impossible.
+            print(f"Error contacting commsrvr heartbeat: {type(e).__name__}: {e}")
             return None
 
     def _handle_db_update(self, content: str) -> bool:
@@ -4057,8 +4089,10 @@ class MainWindow(QtWidgets.QMainWindow):
         """Create the QRZ contacts table widget spanning both map and message columns."""
         _CONTACTS_HEADERS = [
             "Callsign", "Name", "Address", "City", "State",
-            "Zip", "Country", "Grid", "Class", "Email", "Image", "Date Added"
+            "Zip", "Country", "Grid", "Class", "Email", "Image", "Date Added",
+            "Delete"
         ]
+        _DELETE_COL = len(_CONTACTS_HEADERS) - 1
 
         self.contacts_widget = QtWidgets.QWidget(self.central_widget)
         outer = QtWidgets.QVBoxLayout(self.contacts_widget)
@@ -4087,8 +4121,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "QLineEdit { background-color: white; color: #333333; "
             "border: none; padding: 1px 3px; }"
         )
-        self._contacts_filters: List[QtWidgets.QLineEdit] = []
+        self._contacts_filters: List[Optional[QtWidgets.QLineEdit]] = []
         for col in range(len(_CONTACTS_HEADERS)):
+            if col == _DELETE_COL:
+                # No filter box under the action column.
+                self._contacts_filters.append(None)
+                continue
             edit = QtWidgets.QLineEdit()
             edit.setFont(filter_font)
             edit.setStyleSheet(filter_style)
@@ -4112,6 +4150,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Populate the contacts table from the QRZ cache."""
         _IMAGE_COL = 10
         _DATE_COL = 11
+        _DELETE_COL = 12
 
         data_fg = self.config.get_color('data_foreground')
         kode_font = QtGui.QFont("Kode Mono", -1)
@@ -4164,6 +4203,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.contacts_table.setItem(table_row, col, item)
 
+            # Far-right "Delete" action link.
+            del_item = QTableWidgetItem("Delete")
+            del_item.setFont(kode_font)
+            del_item.setForeground(QColor("#cc0000"))
+            del_item.setTextAlignment(Qt.AlignCenter)
+            del_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.contacts_table.setItem(table_row, _DELETE_COL, del_item)
+
         self.contacts_table.setUpdatesEnabled(True)
         self.contacts_table.resizeColumnsToContents()
 
@@ -4176,7 +4223,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_contacts_filter(self) -> None:
         """Show/hide data rows based on per-column filter inputs. Row 0 is always shown."""
-        filters = [edit.text().strip().upper() for edit in self._contacts_filters]
+        filters = [edit.text().strip().upper() if edit else "" for edit in self._contacts_filters]
         for row in range(1, self.contacts_table.rowCount()):
             match = True
             for col, f in enumerate(filters):
@@ -4210,6 +4257,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     module_foreground=self.config.get_color('module_foreground'),
                     program_background=self.config.get_color('program_background'),
                     program_foreground=self.config.get_color('program_foreground'),
+                    refresh_callback=self._load_message_data,
                     parent=self
                 )
                 dlg.cs_edit.setText(callsign)
@@ -4221,10 +4269,43 @@ class MainWindow(QtWidgets.QMainWindow):
             url = item.data(Qt.UserRole)
             if url:
                 QDesktopServices.openUrl(QUrl(url))
+        elif col == 12:
+            cs_item = self.contacts_table.item(item.row(), 0)
+            callsign = cs_item.text().strip() if cs_item else ""
+            if callsign and self._confirm_delete_contact(callsign):
+                self.db.delete_qrz_contact(callsign)
+                self._load_contacts_data()
+                self._apply_contacts_filter()
         else:
             text = item.text().strip()
             if text and text != "—":
                 QtWidgets.QApplication.clipboard().setText(text)
+
+    def _confirm_delete_contact(self, callsign: str) -> bool:
+        """Yes/No confirmation prompt before deleting a contact. Returns True on Yes."""
+        panel_bg = self.config.get_color('module_background')
+        panel_fg = self.config.get_color('module_foreground')
+        prog_bg = self.config.get_color('program_background')
+        prog_fg = self.config.get_color('program_foreground')
+
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setWindowTitle("Delete Contact")
+        box.setText(f'Are you sure you want to delete "{callsign}" ?')
+        box.setStandardButtons(
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        box.setDefaultButton(QtWidgets.QMessageBox.No)
+        box.setStyleSheet(
+            f"QMessageBox {{ background-color:{panel_bg}; }}"
+            f"QMessageBox QLabel {{ color:{panel_fg}; font-family:'Roboto'; "
+            f"font-size:13px; }}"
+            f"QPushButton {{ background-color:{prog_bg}; color:{prog_fg}; "
+            f"border:none; padding:5px 18px; min-width:60px; "
+            f"font-family:'Roboto'; font-size:13px; }}"
+            f"QPushButton:hover {{ background-color:{prog_fg}; color:{prog_bg}; }}"
+        )
+        return box.exec_() == QtWidgets.QMessageBox.Yes
 
     def _on_contacts_context_menu(self, pos) -> None:
         """Show right-click context menu with Copy option for contacts table."""

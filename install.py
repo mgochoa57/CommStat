@@ -86,16 +86,24 @@ def install(package):
     print(f"  Installing {package}...")
     is_unix = sys.platform == 'darwin' or sys.platform.startswith('linux')
 
+    # Some packages must be refreshed even when an older version is already
+    # present. certifi ships the CA trust bundle: a stale bundle causes TLS
+    # "certificate has expired" failures against renewed Let's Encrypt certs,
+    # so always pull the newest one (plain `pip install` would skip it as
+    # "already satisfied").
+    pkg_name = package.split("==")[0].split(">=")[0].split("<")[0].strip().lower()
+    upgrade = ["--upgrade"] if pkg_name in ("certifi",) else []
+
     # Build candidate command lists to try in order
     attempts = []
     if is_unix:
         if pip_supports_break_system_packages():
             # Preferred: user install with break-system-packages (needed on Ubuntu 24.04+ / Mint 22+)
-            attempts.append([sys.executable, "-m", "pip", "install", "--user", "--break-system-packages", package])
+            attempts.append([sys.executable, "-m", "pip", "install", "--user", "--break-system-packages", *upgrade, package])
         # Fallback: user install without break-system-packages (older distros)
-        attempts.append([sys.executable, "-m", "pip", "install", "--user", package])
+        attempts.append([sys.executable, "-m", "pip", "install", "--user", *upgrade, package])
     else:
-        attempts.append([sys.executable, "-m", "pip", "install", package])
+        attempts.append([sys.executable, "-m", "pip", "install", *upgrade, package])
 
     last_error = None
     for cmd in attempts:
@@ -154,6 +162,7 @@ def lininstall():
         "pandas",
         "maidenhead",
         "pyenchant",
+        "certifi",
     ]
     print(f"\nInstalling {len(packages)} packages...")
     for package in packages:
@@ -171,6 +180,7 @@ def macinstall():
         "pandas",
         "maidenhead",
         "pyenchant",
+        "certifi",
     ]
     print(f"\nInstalling {len(packages)} packages...")
     for package in packages:
@@ -188,6 +198,7 @@ def wininstall():
         "pandas",
         "maidenhead",
         "pyenchant",
+        "certifi",
     ]
     print(f"\nInstalling {len(packages)} packages...")
     for package in packages:
