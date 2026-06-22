@@ -1071,10 +1071,7 @@ class RSSFetcher:
         """Fetch and parse the RSS feed."""
         self._fetching = True
         try:
-            request = urllib.request.Request(
-                feed_url,
-                headers={'User-Agent': 'CommStat/2.5'}
-            )
+            request = urllib.request.Request(feed_url)
 
             with urllib.request.urlopen(request, timeout=10, context=create_insecure_ssl_context()) as response:
                 content = response.read().decode('utf-8', errors='replace')
@@ -3168,9 +3165,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Build heartbeat URL with callsign, data_id, qrz_id, db_version, and build_number parameters
             heartbeat_url = f"{_PING}?cs={callsign}&id={data_id}&qrz={qrz_value}&db={db_version}&build={build_number}&version={VERSION}"
 
-            # Send an explicit User-Agent (some WAFs 403 the default Python-urllib UA)
-            # and verify the cert via certifi so a stale trust store fails loudly, not silently.
-            request = urllib.request.Request(heartbeat_url, headers={'User-Agent': 'CommStat/2.5'})
+            request = urllib.request.Request(heartbeat_url)
             with urllib.request.urlopen(request, timeout=10, context=create_verified_ssl_context()) as response:
                 content = response.read().decode('utf-8')
 
@@ -6780,10 +6775,7 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         def fetch_image():
             """Background thread: fetch image from URL."""
             try:
-                request = urllib.request.Request(
-                    image_url,
-                    headers={'User-Agent': 'CommStat/2.5'}
-                )
+                request = urllib.request.Request(image_url)
                 with urllib.request.urlopen(request, timeout=15, context=create_insecure_ssl_context()) as response:
                     fetch_result['data'] = response.read()
             except Exception as e:
