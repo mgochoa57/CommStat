@@ -3166,7 +3166,7 @@ class MainWindow(QtWidgets.QMainWindow):
             qrz_value = qrz_id if self.tcp_pool.get_connected_rig_names() else 0
 
             # Build heartbeat URL with callsign, data_id, qrz_id, db_version, and build_number parameters
-            heartbeat_url = f"{_PING}?cs={callsign}&id={data_id}&qrz={qrz_value}&db={db_version}&build={build_number}"
+            heartbeat_url = f"{_PING}?cs={callsign}&id={data_id}&qrz={qrz_value}&db={db_version}&build={build_number}&version={VERSION}"
 
             # Send an explicit User-Agent (some WAFs 403 the default Python-urllib UA)
             # and verify the cert via certifi so a stale trust store fails loudly, not silently.
