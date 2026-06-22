@@ -3979,17 +3979,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             content = self._fetch_commsrvr_content()
             if not content:
-                self._commsrvr_fail_count += 1
-                print(f"[Heartbeat] No reply from server (failure {self._commsrvr_fail_count}/{self._commsrvr_max_failures})")
-                if self._commsrvr_fail_count >= self._commsrvr_max_failures:
-                    print(f"[Heartbeat] Max failures reached — backing off to {HEARTBEAT_BACKOFF_MS // 60000} min interval")
-                    self.commsrvr_timer.setInterval(HEARTBEAT_BACKOFF_MS)
                 return
-
-            if self._commsrvr_fail_count >= self._commsrvr_max_failures:
-                print("[Heartbeat] Server reconnected — restoring normal interval")
-                self.commsrvr_timer.setInterval(HEARTBEAT_INTERVAL_MS)
-            self._commsrvr_fail_count = 0
 
             if content.strip() == '1':
                 return
@@ -4018,10 +4008,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     re.search(r'::EXPIRED::', content_stripped)):
                 self._handle_commsrvr_data_messages(content_stripped)
 
-        except Exception as e:
-            self._commsrvr_fail_count += 1
-            if self._commsrvr_fail_count >= self._commsrvr_max_failures:
-                self.commsrvr_timer.setInterval(HEARTBEAT_BACKOFF_MS)
+        except Exception:
+            pass
 
     def _setup_live_feed(self) -> None:
         """Create the live feed text area."""
@@ -4864,8 +4852,6 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             self.internet_timer.start(INTERNET_CHECK_INTERVAL)
 
         # Commsrvr check timer - runs every 3 minutes, starts 30 seconds after launch
-        self._commsrvr_fail_count = 0
-        self._commsrvr_max_failures = 3
         self.commsrvr_timer = QTimer(self)
         self.commsrvr_timer.timeout.connect(self._check_commsrvr)
         if self._internet_available:
