@@ -604,10 +604,12 @@ class _QRZInfoSection(QWidget):
         threading.Thread(target=self._last_seen_thread, args=(target,), daemon=True).start()
 
     def _last_seen_thread(self, target: str) -> None:
+        import sip
         try:
             my_cs = _get_local_callsign()
             if not my_cs:
-                self.last_seen_updated.emit("—")
+                if not sip.isdeleted(self):
+                    self.last_seen_updated.emit("—")
                 return
             url = (
                 f"{_COMMSRVR_URL}/get-last-seen-808585.php"
@@ -615,10 +617,12 @@ class _QRZInfoSection(QWidget):
             )
             with urllib.request.urlopen(url, timeout=8) as resp:
                 result = resp.read().decode("utf-8").strip()
-            self.last_seen_updated.emit(result if result else "—")
+            if not sip.isdeleted(self):
+                self.last_seen_updated.emit(result if result else "—")
         except Exception as e:
             print(f"[QRZInfoSection] last-seen error: {e}")
-            self.last_seen_updated.emit("—")
+            if not sip.isdeleted(self):
+                self.last_seen_updated.emit("—")
 
     def _on_last_seen_updated(self, value: str) -> None:
         _k = "font-family:Roboto; font-weight:bold; font-size:13px;"

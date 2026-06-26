@@ -101,7 +101,7 @@ WINDOW_WIDTH = 700
 WINDOW_HEIGHT = 510
 WINDOW_HEIGHT_EXPANDED = 650
 INTERNET_RIG = "INTERNET ONLY"
-REMARKS_MAX_RADIO = 67
+REMARKS_MAX_RADIO = 500
 REMARKS_MAX_INTERNET = 500
 NEWLINE_PLACEHOLDER = "||"
 
@@ -174,7 +174,7 @@ class StatRepDialog(QDialog):
         self.module_background = module_background
         self.data_background = data_background
 
-        apply_standard_dialog_chrome(self, "Status Report", WINDOW_WIDTH, WINDOW_HEIGHT)
+        apply_standard_dialog_chrome(self, "Status Report", WINDOW_WIDTH, WINDOW_HEIGHT_EXPANDED)
 
         self._commsrvr_error.connect(self._on_commsrvr_error)
 
@@ -244,38 +244,20 @@ class StatRepDialog(QDialog):
         return hasattr(self, 'rig_combo') and self.rig_combo.currentText() == INTERNET_RIG
 
     def _get_remarks_text(self) -> str:
-        """Get remarks text from whichever widget is currently active."""
-        if self._is_internet_only() and hasattr(self, 'remarks_expanded'):
+        """Get remarks text from the expanded widget."""
+        if hasattr(self, 'remarks_expanded'):
             return self.remarks_expanded.toPlainText().strip()
         return self.remarks_field.text().strip()
 
     def _set_remarks_text(self, text: str) -> None:
-        """Set remarks text on whichever widget is currently active."""
-        if self._is_internet_only() and hasattr(self, 'remarks_expanded'):
+        """Set remarks text on the expanded widget."""
+        if hasattr(self, 'remarks_expanded'):
             self.remarks_expanded.setPlainText(text)
         else:
             self.remarks_field.setText(text)
 
     def _swap_remarks_widget(self, internet_only: bool) -> None:
-        """Swap between single-line and multi-line remarks field."""
-        if not hasattr(self, 'remarks_expanded'):
-            return
-
-        # Transfer text between widgets
-        if internet_only:
-            current_text = self.remarks_field.text().strip()
-            self.remarks_field.hide()
-            self.remarks_expanded.setPlainText(current_text)
-            self.remarks_expanded.show()
-            self.setFixedHeight(WINDOW_HEIGHT_EXPANDED)
-        else:
-            current_text = self.remarks_expanded.toPlainText().strip()
-            self.remarks_expanded.hide()
-            # Collapse multi-line to single line, truncate if needed
-            single_line = current_text.replace('\n', ' ').replace('\r', '')
-            self.remarks_field.setText(single_line[:REMARKS_MAX_RADIO])
-            self.remarks_field.show()
-            self.setFixedHeight(WINDOW_HEIGHT)
+        """No-op: expanded remarks widget is always shown."""
 
     def _get_all_groups_from_db(self) -> list:
         """Get all groups from the database."""
@@ -776,10 +758,8 @@ class StatRepDialog(QDialog):
 
         self.remarks_field = QtWidgets.QLineEdit()
         self.remarks_field.setFont(mono_font())
-        self.remarks_field.setMinimumHeight(30)
         self.remarks_field.setMaxLength(REMARKS_MAX_RADIO)
-        self.remarks_field.setPlaceholderText(f"Optional - {REMARKS_MAX_RADIO} characters max")
-        self.remarks_field.setText(self._get_default_remarks())
+        self.remarks_field.hide()
         layout.addWidget(self.remarks_field)
 
         self.remarks_expanded = QtWidgets.QPlainTextEdit()
@@ -792,7 +772,8 @@ class StatRepDialog(QDialog):
             f"background-color: white; color: {COLOR_INPUT_TEXT};"
             f" border: 1px solid {COLOR_INPUT_BORDER}; border-radius: 4px; padding: 2px 4px;"
         )
-        self.remarks_expanded.hide()
+        _, _, initial_state = self._get_internet_user_settings()
+        self.remarks_expanded.setPlainText(initial_state)
         layout.addWidget(self.remarks_expanded)
 
         layout.addStretch()

@@ -21,7 +21,7 @@ from PyQt5.QtCore import QDateTime
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QComboBox,
-    QMessageBox,
+    QMessageBox, QPlainTextEdit,
 )
 
 from constants import (
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 MIN_CALLSIGN_LENGTH = 4
 MAX_CALLSIGN_LENGTH = 8
 MAX_TITLE_LENGTH    = 20
-MAX_MESSAGE_LENGTH  = 277
+MAX_MESSAGE_LENGTH  = 195
 DATABASE_FILE       = "traffic.db3"
 
 _COMMSRVR = base64.b64decode("aHR0cHM6Ly9jb21tc3RhdC5hcHA=").decode()
@@ -144,6 +144,9 @@ class AlertDialog(QDialog):
             f"QLineEdit {{ background-color:white; color:#333333; border:1px solid #cccccc;"
             f" border-radius:4px; padding:2px 6px; font-family:'Kode Mono'; font-size:13px; }}"
             f"QLineEdit:focus {{ border:1px solid #007bff; }}"
+            f"QPlainTextEdit {{ background-color:white; color:#333333; border:1px solid #cccccc;"
+            f" border-radius:4px; padding:2px 6px; font-family:'Kode Mono'; font-size:13px; }}"
+            f"QPlainTextEdit:focus {{ border:1px solid #007bff; }}"
             f"QComboBox {{ background-color:white; color:#333333; border:1px solid #cccccc;"
             f" border-radius:4px; padding:2px 4px; font-family:'Kode Mono'; font-size:13px;"
             f" combobox-popup:0; }}"
@@ -260,9 +263,18 @@ class AlertDialog(QDialog):
         message_lbl.setFont(label_font())
         body.addWidget(message_lbl)
 
-        self.message_field = QLineEdit()
-        self.message_field.setMaxLength(MAX_MESSAGE_LENGTH)
-        self.message_field.setPlaceholderText("277 characters max")
+        self.message_field = QPlainTextEdit()
+        self.message_field.setPlaceholderText("195 characters max")
+        self.message_field.setFixedHeight(86)
+        def _enforce_msg_limit():
+            text = self.message_field.toPlainText()
+            if len(text) > MAX_MESSAGE_LENGTH:
+                cursor = self.message_field.textCursor()
+                pos = cursor.position()
+                self.message_field.setPlainText(text[:MAX_MESSAGE_LENGTH])
+                cursor.setPosition(min(pos, MAX_MESSAGE_LENGTH))
+                self.message_field.setTextCursor(cursor)
+        self.message_field.textChanged.connect(_enforce_msg_limit)
         body.addWidget(self.message_field)
 
         body.addStretch()
@@ -492,7 +504,7 @@ class AlertDialog(QDialog):
             self.title_field.setFocus()
             return None
 
-        message = re.sub(r"[^ -~]+", " ", self.message_field.text()).strip()
+        message = re.sub(r"[^ -~]+", " ", self.message_field.toPlainText()).strip()
         if len(message) < 1:
             self._show_error("Message is required")
             self.message_field.setFocus()

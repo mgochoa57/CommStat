@@ -2832,7 +2832,7 @@ class MainWindow(QtWidgets.QMainWindow):
         alert_layout.setAlignment(Qt.AlignTop)
 
         # Add small spacing at top
-        alert_layout.addSpacing(20)
+        alert_layout.addSpacing(2)
 
         # Title label (first line)
         self.alert_title_label = QtWidgets.QLabel()
@@ -3073,9 +3073,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if group:
                 # Show group + ALERT at top, then title in bold below (strip @ symbol)
                 group_display = group.lstrip('@')
-                formatted_title = f'<div style="font-family: \'Kode Mono\'; font-size: 22px; font-weight: bold; margin-top: -18px;">@{group_display} - ALERT</div>'
+                formatted_title = f'<div style="font-family: \'Kode Mono\'; font-size: 22px; font-weight: bold; margin-top: -6px;">@{group_display} - ALERT</div>'
                 if title:
-                    formatted_title += f'<div style="font-family: \'Roboto Slab\'; font-size: 30px; font-weight: 900; margin-top: 24px;">{title}</div>'
+                    formatted_title += f'<div style="font-family: \'Roboto Slab\'; font-size: 30px; font-weight: 900; margin-top: 18px;">{title}</div>'
             else:
                 # No group, just show title in bold
                 formatted_title = f'<div style="font-family: \'Roboto Slab\'; font-size: 26px; font-weight: 900;">{title if title else ""}</div>'
