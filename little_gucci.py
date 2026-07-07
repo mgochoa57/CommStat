@@ -22,6 +22,7 @@ import os
 import io
 import re
 import base64
+import json
 import faulthandler
 import socket
 import sqlite3
@@ -98,6 +99,9 @@ from constants import *
 _COMMSRVR = base64.b64decode("aHR0cHM6Ly9jb21tc3RhdC5hcHA=").decode()
 _PING = _COMMSRVR + "/heartbeat-808585.php"
 
+# Backoff interval after repeated commsrvr heartbeat failures.
+HEARTBEAT_BACKOFF_MS = 30 * 60 * 1000  # 30 minutes
+
 # Pixels of mouse-wheel scroll required to advance one Leaflet zoom level
 # on the bottom-left map. Leaflet default is 60; raised to dampen sensitivity.
 # Paired with zoomSnap=0.25 in the folium.Map() call so fractional zoom is
@@ -109,14 +113,14 @@ MAP_WHEEL_PX_PER_ZOOM = 360
 # CircleMarker pixel radii, so on-screen diameter is 2x these numbers. Keys match
 # the scope strings stored in the DB (see SCOPE_MAP in map_f301_digits_to_fields).
 SCOPE_RADIUS = {
-    "My Location":     4,
-    "My Community":    7,
-    "My County":      10,
-    "My Region":      13,
-    "Other Location": 5,
+    "My Location":     3,
+    "My Community":   10,
+    "My County":      16,
+    "My Region":      22,
+    "Other Location": 16,
 }
 # Fallback radius for an unknown/missing scope (treated like My Location).
-SCOPE_RADIUS_DEFAULT = 4
+SCOPE_RADIUS_DEFAULT = 3
 
 # Contacts capture (Direct Message Part 1):
 #  - The sender of the RX.DIRECTED (from_call) is the RELAY — the station we
@@ -759,6 +763,11 @@ class CustomWebEnginePage(QWebEnginePage):
                 self.parent_widget._on_video_skip()
             return False  # Prevent navigation
 
+        # Open USGS earthquake event links in the user's browser.
+        if url.scheme() in ("http", "https") and "earthquake.usgs.gov" in url.host():
+            QDesktopServices.openUrl(url)
+            return False
+
         # Handle statrep links from map popups: /statrep/{id}/{callsign}
         if url.path().startswith("/statrep/"):
             parts = url.path().strip("/").split("/")
@@ -865,6 +874,15 @@ class ConfigManager:
                 'sound_alert_enabled':   True, 'sound_alert_file':   sound_defaults['alert'],
                 'sound_message_enabled': True, 'sound_message_file': sound_defaults['message'],
                 'sound_statrep_enabled': True, 'sound_statrep_file': sound_defaults['statrep'],
+                'weather_radar': False,
+                'weather_radar_refresh': 5,
+                'show_radar_timestamp': True,
+                'earthquake_layer': False,
+                'earthquake_min_mag': 2.5,
+                'earthquake_region': 'Worldwide',
+                'earthquake_refresh': 10,
+                'font_family': 'Segoe UI',
+                'font_size': 9,
             }
             return
 
@@ -895,6 +913,12 @@ class ConfigManager:
                 'sound_message_file':    config.get("DIRECTEDCONFIG", "sound_message_file",    fallback=sound_defaults['message']),
                 'sound_statrep_enabled': config.getboolean("DIRECTEDCONFIG", "sound_statrep_enabled", fallback=seed),
                 'sound_statrep_file':    config.get("DIRECTEDCONFIG", "sound_statrep_file",    fallback=sound_defaults['statrep']),
+                'weather_radar':          config.getboolean("DIRECTEDCONFIG", "weather_radar",          fallback=False),
+                'earthquake_layer':       config.getboolean("DIRECTEDCONFIG", "earthquake_layer",       fallback=False),
+                'earthquake_min_mag':     config.getfloat("DIRECTEDCONFIG", "earthquake_min_mag",     fallback=2.5),
+                'earthquake_region':      config.get("DIRECTEDCONFIG", "earthquake_region",      fallback="Worldwide"),
+                'earthquake_refresh':     config.getint("DIRECTEDCONFIG", "earthquake_refresh",     fallback=10),
+                'map_theme':              config.get("DIRECTEDCONFIG", "map_theme",              fallback='dark'),
             }
         else:
             self.directed_config = {
@@ -906,7 +930,23 @@ class ConfigManager:
                 'sound_alert_enabled':   True, 'sound_alert_file':   sound_defaults['alert'],
                 'sound_message_enabled': True, 'sound_message_file': sound_defaults['message'],
                 'sound_statrep_enabled': True, 'sound_statrep_file': sound_defaults['statrep'],
+                'weather_radar': False,
+                'weather_radar_refresh': 5,
+                'show_radar_timestamp': True,
+                'earthquake_layer': False,
+                'earthquake_min_mag': 2.5,
+                'earthquake_region': 'Worldwide',
+                'earthquake_refresh': 10,
+                'map_theme': 'dark',
             }
+
+        # Load user-edited UI colors from config.ini [COLORS].
+        # Values here override DEFAULT_COLORS without touching constants.py.
+        if config.has_section("COLORS"):
+            for key, value in config.items("COLORS"):
+                if key in self.colors and value:
+                    self.colors[key] = value.strip()
+
 
     @staticmethod
     def _default_sound_files() -> Dict[str, str]:
@@ -934,6 +974,42 @@ class ConfigManager:
     def get_color(self, key: str) -> str:
         """Get a color value by key."""
         return self.colors.get(key, '#FFFFFF')
+
+    def set_color(self, key: str, value: str) -> None:
+        """Save a UI color override to config.ini."""
+        if key not in self.colors:
+            return
+        self.colors[key] = value
+        config = ConfigParser()
+        config.read(self.config_path)
+        if not config.has_section("COLORS"):
+            config.add_section("COLORS")
+        config.set("COLORS", key, value)
+        with open(self.config_path, 'w') as f:
+            config.write(f)
+
+    def set_colors(self, colors: Dict[str, str]) -> None:
+        """Save multiple UI color overrides to config.ini."""
+        config = ConfigParser()
+        config.read(self.config_path)
+        if not config.has_section("COLORS"):
+            config.add_section("COLORS")
+        for key, value in colors.items():
+            if key in self.colors:
+                self.colors[key] = value
+                config.set("COLORS", key, value)
+        with open(self.config_path, 'w') as f:
+            config.write(f)
+
+    def reset_colors(self) -> None:
+        """Remove all UI color overrides and restore DEFAULT_COLORS."""
+        self.colors = DEFAULT_COLORS.copy()
+        config = ConfigParser()
+        config.read(self.config_path)
+        if config.has_section("COLORS"):
+            config.remove_section("COLORS")
+            with open(self.config_path, 'w') as f:
+                config.write(f)
 
     def _save_setting(self, key: str, value) -> None:
         """Save a setting to both memory and config file."""
@@ -1012,6 +1088,74 @@ class ConfigManager:
 
     def set_apply_text_normalization(self, value: bool) -> None:
         self._save_setting('apply_text_normalization', value)
+
+
+    def get_weather_radar(self) -> bool:
+        return self.directed_config.get('weather_radar', False)
+
+    def set_weather_radar(self, value: bool) -> None:
+        self._save_setting('weather_radar', value)
+
+    def get_weather_radar_refresh(self) -> int:
+        return int(self.directed_config.get('weather_radar_refresh', 5))
+
+    def set_weather_radar_refresh(self, value: int) -> None:
+        self._save_setting('weather_radar_refresh', value)
+
+    def get_show_radar_timestamp(self) -> bool:
+        return bool(self.directed_config.get('show_radar_timestamp', True))
+
+    def set_show_radar_timestamp(self, value: bool) -> None:
+        self._save_setting('show_radar_timestamp', value)
+
+
+    def get_map_theme(self) -> str:
+        return self.directed_config.get('map_theme', 'dark')
+
+    def set_map_theme(self, value: str) -> None:
+        self._save_setting('map_theme', value)
+
+    def get_font_family(self) -> str:
+        return self.directed_config.get('font_family', 'Segoe UI')
+
+    def set_font_family(self, value: str) -> None:
+        self._save_setting('font_family', value)
+
+    def get_font_size(self) -> int:
+        return int(self.directed_config.get('font_size', 9))
+
+    def set_font_size(self, value: int) -> None:
+        self._save_setting('font_size', value)
+
+    def get_earthquake_layer(self) -> bool:
+        return bool(self.directed_config.get('earthquake_layer', False))
+
+    def set_earthquake_layer(self, value: bool) -> None:
+        self._save_setting('earthquake_layer', value)
+
+    def get_earthquake_min_mag(self) -> float:
+        try:
+            return float(self.directed_config.get('earthquake_min_mag', 2.5))
+        except Exception:
+            return 2.5
+
+    def set_earthquake_min_mag(self, value: float) -> None:
+        self._save_setting('earthquake_min_mag', value)
+
+    def get_earthquake_region(self) -> str:
+        return self.directed_config.get('earthquake_region', 'Worldwide')
+
+    def set_earthquake_region(self, value: str) -> None:
+        self._save_setting('earthquake_region', value)
+
+    def get_earthquake_refresh(self) -> int:
+        try:
+            return int(self.directed_config.get('earthquake_refresh', 10))
+        except Exception:
+            return 10
+
+    def set_earthquake_refresh(self, value: int) -> None:
+        self._save_setting('earthquake_refresh', value)
 
     def get_selected_rss_feed(self) -> str:
         return self.directed_config.get('selected_rss_feed', list(DEFAULT_RSS_FEEDS.keys())[0])
@@ -1933,6 +2077,153 @@ class SoundPlayer:
             effect.setSource(QUrl.fromLocalFile(abs_path))
 
 
+class ThemeManagerDialog(QtWidgets.QDialog):
+    """Theme Manager: edit CommStat UI colors with color pickers and reset to original defaults."""
+
+    COLOR_LABELS = [
+        ("program_background", "Main Background"),
+        ("program_foreground", "Main Text"),
+        ("menu_background", "Menu Background"),
+        ("menu_foreground", "Menu Text"),
+        ("title_bar_background", "Header Bar Background"),
+        ("title_bar_foreground", "Header Bar Text"),
+        ("newsfeed_background", "News Ticker Background"),
+        ("newsfeed_foreground", "News Ticker Text"),
+        ("time_background", "Clock Background"),
+        ("time_foreground", "Clock Text"),
+        ("data_background", "Table Background"),
+        ("data_foreground", "Table Text"),
+        ("feed_background", "Live Feed Background"),
+        ("feed_foreground", "Live Feed Text"),
+        ("module_background", "Panel / Dialog Background"),
+        ("module_foreground", "Panel / Dialog Text"),
+        ("condition_green", "Status Green"),
+        ("condition_yellow", "Status Yellow"),
+        ("condition_red", "Status Red"),
+        ("condition_gray", "Status Gray"),
+    ]
+
+    def __init__(self, config: "ConfigManager", apply_callback=None, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.apply_callback = apply_callback
+        self.pending_colors: Dict[str, str] = {}
+        self.setWindowTitle("Theme Manager")
+        self.resize(560, 720)
+        self.color_buttons: Dict[str, QtWidgets.QPushButton] = {}
+
+        self.setStyleSheet("""
+            QDialog { background-color: #101510; color: #F0EAD6; }
+            QLabel {
+                color: #F0EAD6;
+                font-family: Roboto;
+                font-size: 14px;
+                font-weight: bold;
+                background: transparent;
+            }
+            QPushButton {
+                font-family: Roboto;
+                font-size: 13px;
+                padding: 6px 8px;
+            }
+            QScrollArea {
+                background-color: #101510;
+                border: 1px solid #3B4B2A;
+            }
+        """)
+
+        outer = QtWidgets.QVBoxLayout(self)
+
+        title = QtWidgets.QLabel("Theme Manager")
+        title_font = QtGui.QFont("Roboto", -1, QtGui.QFont.Bold)
+        title_font.setPixelSize(18)
+        title.setFont(title_font)
+        outer.addWidget(title)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QtWidgets.QWidget()
+        body.setStyleSheet("background-color: #101510;")
+        grid = QtWidgets.QGridLayout(body)
+        grid.setColumnStretch(1, 1)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
+
+        for row, (key, label) in enumerate(self.COLOR_LABELS):
+            lbl = QtWidgets.QLabel(label)
+            lbl.setMinimumWidth(220)
+            lbl.setStyleSheet("color: #F0EAD6; font-weight: bold; background: transparent;")
+            grid.addWidget(lbl, row, 0)
+
+            btn = QtWidgets.QPushButton(self.config.get_color(key))
+            btn.setMinimumWidth(130)
+            btn.clicked.connect(lambda _, k=key: self._pick_color(k))
+            self.color_buttons[key] = btn
+            self._style_color_button(btn, self.config.get_color(key))
+            grid.addWidget(btn, row, 1)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        bottom = QtWidgets.QHBoxLayout()
+        apply_btn = QtWidgets.QPushButton("Apply")
+        apply_btn.clicked.connect(self._apply_pending)
+        reset_btn = QtWidgets.QPushButton("Reset To Default")
+        reset_btn.clicked.connect(self._reset_default)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+
+        bottom.addWidget(apply_btn)
+        bottom.addWidget(reset_btn)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        outer.addLayout(bottom)
+
+        note = QtWidgets.QLabel("Pick colors, then press Apply. Reset To Default restores original CommStat colors.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #F0EAD6; background: transparent;")
+        outer.addWidget(note)
+
+    def _style_color_button(self, button: QtWidgets.QPushButton, color: str) -> None:
+        fg = "#000000" if self._is_light(color) else "#FFFFFF"
+        button.setText(color)
+        button.setStyleSheet(
+            f"QPushButton {{ background-color: {color}; color: {fg}; border: 1px solid #777; }}"
+        )
+
+    def _is_light(self, color: str) -> bool:
+        try:
+            c = QtGui.QColor(color)
+            return (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) > 160
+        except Exception:
+            return False
+
+    def _pick_color(self, key: str) -> None:
+        current = QtGui.QColor(self.pending_colors.get(key, self.config.get_color(key)))
+        color = QtWidgets.QColorDialog.getColor(current, self, f"Select {key}")
+        if color.isValid():
+            value = color.name().upper()
+            self.pending_colors[key] = value
+            self._style_color_button(self.color_buttons[key], value)
+
+    def _apply_pending(self) -> None:
+        if self.pending_colors:
+            self.config.set_colors(self.pending_colors)
+            self.pending_colors.clear()
+        self._apply_live()
+
+    def _reset_default(self) -> None:
+        self.pending_colors.clear()
+        self.config.reset_colors()
+        for key, btn in self.color_buttons.items():
+            self._style_color_button(btn, self.config.get_color(key))
+        self._apply_live()
+
+    def _apply_live(self) -> None:
+        if self.apply_callback:
+            self.apply_callback()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """Main application window for CommStat."""
 
@@ -2000,6 +2291,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._setup_window()
         self._setup_ui()
+        self._sync_weather_radar_action()
+        self._setup_radar_refresh_timer()
 
     def _setup_window(self) -> None:
         """Configure window properties (size, title, icon)."""
@@ -2135,20 +2428,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.main_layout = QtWidgets.QGridLayout(self.central_widget)
         self.main_layout.setObjectName("mainLayout")
 
-        # Row stretches (menu bar handled by QMainWindow.setMenuBar)
+        # Main grid: header at top, resizable content splitter below
         self.main_layout.setRowStretch(0, 0)  # Unused (was menu bar)
         self.main_layout.setRowStretch(1, 0)  # Header
-        self.main_layout.setRowStretch(2, 1)  # StatRep table (50%)
-        self.main_layout.setRowStretch(3, 1)  # Feed text (50%)
-        self.main_layout.setRowStretch(4, 0)  # Map row 1 / Filter (fixed)
-        self.main_layout.setRowStretch(5, 0)  # Map row 2 / Messages (fixed)
+        self.main_layout.setRowStretch(2, 1)  # Resizable content area
+        self.main_layout.setColumnStretch(0, 1)
+        self.main_layout.setColumnStretch(1, 1)
 
         # Setup components
         self._setup_menu()
         self._setup_header()
+        self._setup_resizable_panes()
         self._setup_statrep_table()
-        self._setup_map_widget()
         self._setup_live_feed()
+        self._setup_map_widget()
         self._setup_message_table()
         self._setup_contacts_widget()
         self._setup_timers()
@@ -2167,6 +2460,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_map()
         self._load_live_feed()
         self._load_message_data()
+
+    def _setup_resizable_panes(self) -> None:
+        """Create splitters so the operator can freely resize the main panes."""
+        self.content_splitter = QtWidgets.QSplitter(Qt.Vertical, self.central_widget)
+        self.content_splitter.setObjectName("contentSplitter")
+        self.content_splitter.setChildrenCollapsible(False)
+        self.content_splitter.setHandleWidth(8)
+
+        self.bottom_splitter = QtWidgets.QSplitter(Qt.Horizontal, self.central_widget)
+        self.bottom_splitter.setObjectName("bottomSplitter")
+        self.bottom_splitter.setChildrenCollapsible(False)
+        self.bottom_splitter.setHandleWidth(8)
+
+        # Left side of the bottom splitter can show Map, Images, or Alerts.
+        self.map_stack = QtWidgets.QStackedWidget(self.central_widget)
+        self.map_stack.setObjectName("mapStack")
+        self.map_stack.setMinimumSize(320, 180)
+
+        self.bottom_splitter.addWidget(self.map_stack)
+        self.content_splitter.addWidget(self.bottom_splitter)
+
+        self.main_layout.addWidget(self.content_splitter, 2, 0, 1, 2)
+
+        # Widgets are created later by _setup_statrep_table(),
+        # _setup_live_feed(), _setup_map_widget(), and _setup_message_table().
+        # Do not load data here; those widgets do not exist yet.
 
         # Commsrvr check will start automatically after 30 seconds via timer
 
@@ -2303,6 +2622,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("js8_connectors", "JS8 Connectors",  self._on_js8_connectors),
             ("qrz_enable",     "QRZ Settings",    self._on_qrz_enable),
             ("sound_settings", "Sound Settings",  self._on_sound_settings),
+            ("theme_manager",  "Theme Manager",   self._on_theme_manager),
         ]
 
         # Create actions for dropdown menu
@@ -2322,13 +2642,17 @@ class MainWindow(QtWidgets.QMainWindow):
         alerts_messages_label.setEnabled(False)  # Disabled as a section title
         self.menu.addAction(alerts_messages_label)
 
-        self.save_all_alerts_checkbox = self._create_menu_checkbox(
-            self.menu, "Save all Alerts",
-            self.config.get_save_all_alerts(), self._on_toggle_save_all_alerts)
+        self.save_all_alerts_action = QtWidgets.QAction("Save all Alerts", self)
+        self.save_all_alerts_action.setCheckable(True)
+        self.save_all_alerts_action.setChecked(self.config.get_save_all_alerts())
+        self.save_all_alerts_action.triggered.connect(self._on_toggle_save_all_alerts)
+        self.menu.addAction(self.save_all_alerts_action)
 
-        self.save_all_messages_checkbox = self._create_menu_checkbox(
-            self.menu, "Save all Messages",
-            self.config.get_save_all_messages(), self._on_toggle_save_all_messages)
+        self.save_all_messages_action = QtWidgets.QAction("Save all Messages", self)
+        self.save_all_messages_action.setCheckable(True)
+        self.save_all_messages_action.setChecked(self.config.get_save_all_messages())
+        self.save_all_messages_action.triggered.connect(self._on_toggle_save_all_messages)
+        self.menu.addAction(self.save_all_messages_action)
 
         alerts_messages_help = QtWidgets.QAction("Help", self)
         alerts_messages_help.triggered.connect(self._on_alerts_messages_help)
@@ -2409,13 +2733,17 @@ class MainWindow(QtWidgets.QMainWindow):
         live_feed_label.setEnabled(False)  # Disabled as a section title
         self.filter_menu.addAction(live_feed_label)
 
-        self.hide_heartbeat_checkbox = self._create_menu_checkbox(
-            self.filter_menu, "Hide CQ & Heartbeat",
-            self.config.get_hide_heartbeat(), self._on_toggle_heartbeat)
+        self.hide_heartbeat_action = QtWidgets.QAction("Hide CQ & Heartbeat", self)
+        self.hide_heartbeat_action.setCheckable(True)
+        self.hide_heartbeat_action.setChecked(self.config.get_hide_heartbeat())
+        self.hide_heartbeat_action.triggered.connect(self._on_toggle_heartbeat)
+        self.filter_menu.addAction(self.hide_heartbeat_action)
 
-        self.hide_live_feed_checkbox = self._create_menu_checkbox(
-            self.filter_menu, "Hide Live Feed",
-            False, self._on_toggle_hide_live_feed)
+        self.hide_live_feed_action = QtWidgets.QAction("Hide Live Feed", self)
+        self.hide_live_feed_action.setCheckable(True)
+        self.hide_live_feed_action.setChecked(False)
+        self.hide_live_feed_action.triggered.connect(self._on_toggle_hide_live_feed)
+        self.filter_menu.addAction(self.hide_live_feed_action)
 
         # STATREP & MESSAGES section
         self.filter_menu.addSeparator()
@@ -2423,22 +2751,120 @@ class MainWindow(QtWidgets.QMainWindow):
         statrep_messages_label.setEnabled(False)  # Disabled as a section title
         self.filter_menu.addAction(statrep_messages_label)
 
-        self.hide_internet_statrep_checkbox = self._create_menu_checkbox(
-            self.filter_menu, "Hide Internet Feed",
-            False, self._on_toggle_hide_internet_statrep)
+        self.hide_internet_statrep_action = QtWidgets.QAction("Hide Internet Feed", self)
+        self.hide_internet_statrep_action.setCheckable(True)
+        self.hide_internet_statrep_action.setChecked(False)
+        self.hide_internet_statrep_action.triggered.connect(self._on_toggle_hide_internet_statrep)
+        self.filter_menu.addAction(self.hide_internet_statrep_action)
 
-        self.hide_green_pins_checkbox = self._create_menu_checkbox(
-            self.filter_menu, "Hide Green Pins",
-            False, self._on_toggle_hide_green_pins)
+        self.hide_green_pins_action = QtWidgets.QAction("Hide Green Pins", self)
+        self.hide_green_pins_action.setCheckable(True)
+        self.hide_green_pins_action.setChecked(False)
+        self.hide_green_pins_action.triggered.connect(self._on_toggle_hide_green_pins)
+        self.filter_menu.addAction(self.hide_green_pins_action)
 
         # Per-group checkboxes are inserted here dynamically after DB is ready
         self.filter_group_actions: Dict[str, QtWidgets.QAction] = {}
 
-        self.show_every_group_checkbox = self._create_menu_checkbox(
-            self.filter_menu, "Show Other Groups",
-            self.config.get_show_every_group(), self._on_toggle_show_every_group)
-        # Keep a reference to the QWidgetAction so insertAction() can use it as anchor
-        self.show_every_group_action = self.filter_menu.actions()[-1]
+        self.show_every_group_action = QtWidgets.QAction("Show Other Groups", self)
+        self.show_every_group_action.setCheckable(True)
+        self.show_every_group_action.setChecked(self.config.get_show_every_group())
+        self.show_every_group_action.triggered.connect(self._on_toggle_show_every_group)
+        self.filter_menu.addAction(self.show_every_group_action)
+
+        # Map theme menu
+        self.map_theme_menu = _MenuBarMenu("Map", self.menubar)
+        self.menubar.addMenu(self.map_theme_menu)
+        self.map_theme_menu.setStyleSheet(
+            "QMenu::item:disabled { background-color: #1a5fa8; color: white; font-weight: bold; }"
+        )
+
+        map_overlay_label = QtWidgets.QAction("Map Overlay Options", self)
+        map_overlay_label.setEnabled(False)
+        self.map_theme_menu.addAction(map_overlay_label)
+
+        self.map_radar_action = QtWidgets.QAction("Weather Radar", self)
+        self.map_radar_action.setCheckable(True)
+        self.map_radar_action.setChecked(self.config.get_weather_radar() and self._internet_available)
+        self.map_radar_action.setEnabled(self._internet_available)
+        self.map_radar_action.triggered.connect(self._set_weather_radar)
+        self.map_theme_menu.addAction(self.map_radar_action)
+
+        self.map_radar_refresh_menu = self.map_theme_menu.addMenu("Radar Refresh")
+        self.map_radar_refresh_actions = {}
+        for minutes, label in [(0, "Off"), (2, "2 Minutes"), (5, "5 Minutes"), (10, "10 Minutes")]:
+            action = QtWidgets.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(self.config.get_weather_radar_refresh() == minutes)
+            action.triggered.connect(lambda checked=False, m=minutes: self._set_weather_radar_refresh(m))
+            self.map_radar_refresh_menu.addAction(action)
+            self.map_radar_refresh_actions[minutes] = action
+
+        self.map_radar_timestamp_action = QtWidgets.QAction("Show Radar Timestamp", self)
+        self.map_radar_timestamp_action.setCheckable(True)
+        self.map_radar_timestamp_action.setChecked(self.config.get_show_radar_timestamp())
+        self.map_radar_timestamp_action.triggered.connect(self._set_show_radar_timestamp)
+        self.map_theme_menu.addAction(self.map_radar_timestamp_action)
+
+        self.map_theme_menu.addSeparator()
+
+        self.map_earthquake_action = QtWidgets.QAction("Earthquakes (USGS)", self)
+        self.map_earthquake_action.setCheckable(True)
+        self.map_earthquake_action.setChecked(self.config.get_earthquake_layer())
+        self.map_earthquake_action.setEnabled(self._internet_available)
+        self.map_earthquake_action.triggered.connect(self._set_earthquake_layer)
+        self.map_theme_menu.addAction(self.map_earthquake_action)
+
+        self.map_eq_region_menu = self.map_theme_menu.addMenu("Earthquake Region")
+        self.map_eq_region_actions = {}
+        for region in ["USA", "North America", "Worldwide"]:
+            action = QtWidgets.QAction(region, self)
+            action.setCheckable(True)
+            action.setChecked(self.config.get_earthquake_region() == region)
+            action.triggered.connect(lambda checked=False, r=region: self._set_earthquake_region(r))
+            self.map_eq_region_menu.addAction(action)
+            self.map_eq_region_actions[region] = action
+
+        self.map_eq_mag_menu = self.map_theme_menu.addMenu("Earthquake Min Magnitude")
+        self.map_eq_mag_actions = {}
+        for mag_value, label in [(0.0, "All"), (2.5, "2.5+"), (4.5, "4.5+"), (5.5, "5.5+")]:
+            action = QtWidgets.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(abs(self.config.get_earthquake_min_mag() - mag_value) < 0.01)
+            action.triggered.connect(lambda checked=False, m=mag_value: self._set_earthquake_min_mag(m))
+            self.map_eq_mag_menu.addAction(action)
+            self.map_eq_mag_actions[mag_value] = action
+
+        self.map_eq_refresh_menu = self.map_theme_menu.addMenu("Earthquake Refresh")
+        self.map_eq_refresh_actions = {}
+        for minutes, label in [(5, "5 Minutes"), (10, "10 Minutes"), (30, "30 Minutes")]:
+            action = QtWidgets.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(self.config.get_earthquake_refresh() == minutes)
+            action.triggered.connect(lambda checked=False, m=minutes: self._set_earthquake_refresh(m))
+            self.map_eq_refresh_menu.addAction(action)
+            self.map_eq_refresh_actions[minutes] = action
+
+        map_theme_label = QtWidgets.QAction("Map Theme Options", self)
+        map_theme_label.setEnabled(False)
+        self.map_theme_menu.addAction(map_theme_label)
+
+        self.map_theme_group = QtWidgets.QActionGroup(self)
+        self.map_theme_group.setExclusive(True)
+
+        self.map_dark_action = QtWidgets.QAction("Dark Map", self)
+        self.map_dark_action.setCheckable(True)
+        self.map_dark_action.setChecked(self.config.get_map_theme() == "dark")
+        self.map_dark_action.triggered.connect(lambda: self._set_map_theme("dark"))
+        self.map_theme_group.addAction(self.map_dark_action)
+        self.map_theme_menu.addAction(self.map_dark_action)
+
+        self.map_light_action = QtWidgets.QAction("Light Map", self)
+        self.map_light_action.setCheckable(True)
+        self.map_light_action.setChecked(self.config.get_map_theme() == "light")
+        self.map_light_action.triggered.connect(lambda: self._set_map_theme("light"))
+        self.map_theme_group.addAction(self.map_light_action)
+        self.map_theme_menu.addAction(self.map_light_action)
 
         # Create Tools dropdown menu
         self.tools_menu = _MenuBarMenu("Tools", self.menubar)
@@ -2766,23 +3192,23 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda pos: self._show_table_copy_menu(self.statrep_table, pos)
         )
 
-        self.main_layout.addWidget(self.statrep_table, 2, 0, 1, 2)
+        self.content_splitter.insertWidget(0, self.statrep_table)
 
     def _setup_map_widget(self) -> None:
         """Create the map widget using QWebEngineView."""
         self.map_widget = QWebEngineView(self.central_widget)
         self.map_widget.setObjectName("mapWidget")
-        self.map_widget.setFixedSize(MAP_WIDTH, MAP_HEIGHT)
+        self.map_widget.setMinimumSize(320, 180)
+        self.map_widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
 
         # Set custom page to handle statrep links
         custom_page = CustomWebEnginePage(self)
         self.map_widget.setPage(custom_page)
 
-        # Add to layout (row 4, column 0)
-        self.main_layout.addWidget(self.map_widget, 4, 0, 1, 1, Qt.AlignLeft | Qt.AlignTop)
-
-        # Set column stretches: map column fixed, message column stretches
-        self.main_layout.setColumnStretch(0, 0)  # Map (fixed)
+        # Add to resizable map stack
+        self.map_widget.setMinimumSize(320, 180)
+        self.map_widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.map_stack.addWidget(self.map_widget)
 
         # Setup map disabled label (hidden by default)
         self._setup_map_disabled_label()
@@ -2793,7 +3219,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_map_disabled_label(self) -> None:
         """Create the label/image display shown when map is hidden."""
         self.map_disabled_label = ClickableLabel(self.central_widget)
-        self.map_disabled_label.setFixedSize(MAP_WIDTH, MAP_HEIGHT)
+        self.map_disabled_label.setMinimumSize(320, 180)
+        self.map_disabled_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
         self.map_disabled_label.setAlignment(Qt.AlignCenter)
         self.map_disabled_label.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
 
@@ -2804,8 +3234,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"background-color: {bg_color}; color: {fg_color}; font-size: 18px; font-weight: bold;"
         )
 
-        # Add to same layout position as map
-        self.main_layout.addWidget(self.map_disabled_label, 4, 0, 2, 1, Qt.AlignLeft | Qt.AlignTop)
+        self.map_stack.addWidget(self.map_disabled_label)
 
         # Image slideshow state
         self.slideshow_items: List[str] = []
@@ -2822,7 +3251,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_alert_display(self) -> None:
         """Create the alert display widget shown when Show Alerts is enabled."""
         self.alert_display = QtWidgets.QWidget(self.central_widget)
-        self.alert_display.setFixedSize(MAP_WIDTH, MAP_HEIGHT)
+        self.alert_display.setMinimumSize(320, 180)
+        self.alert_display.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
 
         # Track current alert index (0 = most recent)
         self.alert_index = 0
@@ -2904,11 +3337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.alert_message_label.setStyleSheet("color: #ffffff; font-family: Roboto;")
         self.alert_date_label.setStyleSheet("color: #ffffff; font-family: Roboto;")
 
-        # Add to same layout position as map
-        self.main_layout.addWidget(self.alert_display, 4, 0, 2, 1, Qt.AlignLeft | Qt.AlignTop)
-
-        # Hidden by default
-        self.alert_display.hide()
+        self.map_stack.addWidget(self.alert_display)
 
     def _setup_map_view_buttons(self) -> None:
         """Apply initial map view state (buttons live in the status bar)."""
@@ -2955,11 +3384,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.map_zoom = zoom
             self._last_map_region = mode
             self._stop_slideshow()
-            self.map_disabled_label.hide()
-            self.alert_display.hide()
+            self.bottom_splitter.show()
+            self.map_stack.setCurrentWidget(self.map_widget)
+            self.map_stack.setMinimumSize(604, 340)
+            self.map_stack.setMaximumSize(16777215, 16777215)
+            self.map_stack.setSizePolicy(
+                QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+            self.bottom_splitter.setMinimumHeight(340)
+            self.bottom_splitter.setMaximumHeight(16777215)
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.hide()
-            self.map_widget.show()
             if hasattr(self, 'message_table'):
                 self.message_table.show()
             self.config.set_hide_map(False)
@@ -2967,11 +3401,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set_show_contacts(False)
             self._load_map()
         elif mode == "images":
-            self.map_widget.hide()
-            self.alert_display.hide()
+            self._stop_slideshow()
+            self.bottom_splitter.show()
+            self.map_stack.setCurrentWidget(self.map_disabled_label)
+            self._snap_map_pane()
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.hide()
-            self.map_disabled_label.show()
             if hasattr(self, 'message_table'):
                 self.message_table.show()
             self._start_slideshow()
@@ -2980,8 +3415,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set_show_contacts(False)
         elif mode == "alerts":
             self._stop_slideshow()
-            self.map_widget.hide()
-            self.map_disabled_label.hide()
+            self.bottom_splitter.show()
+            self._snap_map_pane()
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.hide()
             if hasattr(self, 'message_table'):
@@ -2993,20 +3428,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_alert_display()
         elif mode == "contacts":
             self._stop_slideshow()
-            self.map_widget.hide()
-            self.map_disabled_label.hide()
-            self.alert_display.hide()
+            self.bottom_splitter.hide()
             self.config.set_hide_map(True)
             self.config.set_show_alerts(False)
             self.config.set_show_contacts(True)
             if hasattr(self, 'contacts_widget'):
-                if hasattr(self, 'message_table'):
-                    self.message_table.hide()
                 self.contacts_widget.show()
                 self._load_contacts_data()
                 self.contacts_table.viewport().setFocus()
             else:
                 QTimer.singleShot(0, lambda: self._set_map_view_mode("contacts"))
+
+    def _snap_map_pane(self) -> None:
+        """Lock the map pane to exactly 604 × 340 for alerts/images modes."""
+        self.map_stack.setFixedSize(604, 340)
+        self.bottom_splitter.setFixedHeight(340)
+        # Give any freed vertical space back to the statrep table so there is
+        # no gap between the bottom section and the window edge.
+        total = self.content_splitter.height()
+        feed_h = self.feed_text.height() if hasattr(self, 'feed_text') else 100
+        handle_px = self.content_splitter.handleWidth() * 2
+        statrep_h = max(100, total - feed_h - 340 - handle_px)
+        self.content_splitter.setSizes([statrep_h, feed_h, 340])
+        QTimer.singleShot(0, lambda: self.bottom_splitter.setSizes(
+            [604, max(100, self.bottom_splitter.width() - 604 - self.bottom_splitter.handleWidth())]
+        ))
 
     def _update_region_button_pin_indicators(self) -> None:
         """
@@ -3107,7 +3553,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.alert_date_label.setText("")
 
         self.alert_delete_btn.setVisible(alert is not None)
-        self.alert_display.show()
+        self.map_stack.setCurrentWidget(self.alert_display)
 
     def _alert_navigate(self, direction: int) -> None:
         """Navigate alerts by direction (-1 for newer, +1 for older)."""
@@ -3255,6 +3701,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
     def _handle_program_update(self, content: str) -> bool:
+        return False  # Program updates disabled by local build
         """Handle program update from commsrvr server.
 
         Expected format:
@@ -4025,8 +4472,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.feed_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.feed_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # Add to layout (row 3, full width)
-        self.main_layout.addWidget(self.feed_text, 3, 0, 1, 2)
+        # Add to resizable vertical splitter
+        self.feed_text.setMinimumHeight(106)
+        self.content_splitter.insertWidget(1, self.feed_text)
+        self.content_splitter.setSizes([300, 146, 340])
+        self.content_splitter.setStretchFactor(0, 1)  # statrep absorbs all vertical resize
+        self.content_splitter.setStretchFactor(1, 0)  # live feed stays fixed
+        self.content_splitter.setStretchFactor(2, 0)  # bottom section stays fixed
 
     def _load_live_feed(self) -> None:
         """Initialize the live feed display from buffer."""
@@ -4066,7 +4518,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ])
         self.message_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.message_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.message_table.setFixedHeight(MAP_HEIGHT)
+        self.message_table.setMinimumSize(320, 180)
+        self.message_table.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
 
         self.message_table.itemClicked.connect(self._on_message_click)
         self.message_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -4074,7 +4527,10 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda pos: self._show_table_copy_menu(self.message_table, pos)
         )
 
-        self.main_layout.addWidget(self.message_table, 4, 1, 1, 1)
+        self.bottom_splitter.addWidget(self.message_table)
+        self.bottom_splitter.setSizes([MAP_WIDTH, max(400, self.width() - MAP_WIDTH)])
+        self.bottom_splitter.setStretchFactor(0, 0)  # map stays fixed on window resize
+        self.bottom_splitter.setStretchFactor(1, 1)  # messages absorb all horizontal resize
 
     def _setup_contacts_widget(self) -> None:
         """Create the QRZ contacts table widget spanning both map and message columns."""
@@ -4133,8 +4589,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         outer.addWidget(self.contacts_table)
 
-        self.contacts_widget.setFixedHeight(MAP_HEIGHT)
-        self.main_layout.addWidget(self.contacts_widget, 4, 0, 1, 2)
+        self.contacts_widget.setMinimumSize(320, 180)
+        self.contacts_widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.content_splitter.addWidget(self.contacts_widget)
         self.contacts_widget.hide()
 
     def _load_contacts_data(self) -> None:
@@ -4368,6 +4825,135 @@ class MainWindow(QtWidgets.QMainWindow):
             6, QTableWidgetItem(f"{count} {label}")
         )
 
+
+    def _fetch_earthquake_events(self) -> list:
+        """Fetch and cache USGS earthquake GeoJSON. Returns cached data on failure."""
+        try:
+            if not getattr(self, "_internet_available", False):
+                return getattr(self, "_earthquake_cache", [])
+
+            min_mag = 0.0
+            if hasattr(self.config, "get_earthquake_min_mag"):
+                min_mag = float(self.config.get_earthquake_min_mag())
+
+            # Use official USGS 24-hour feeds. Lower magnitude feed has more events.
+            if min_mag >= 4.5:
+                url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson"
+            elif min_mag >= 2.5:
+                url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson"
+            else:
+                url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+
+            now = time.time()
+            refresh_min = self.config.get_earthquake_refresh() if hasattr(self.config, "get_earthquake_refresh") else 10
+            if getattr(self, "_earthquake_cache", None) and now - getattr(self, "_earthquake_cache_time", 0) < max(300, refresh_min * 60):
+                return self._earthquake_cache
+
+            request = urllib.request.Request(url, headers={"User-Agent": "CommStat/2.5"})
+            with urllib.request.urlopen(request, timeout=8, context=create_verified_ssl_context()) as response:
+                data = json.loads(response.read().decode("utf-8", errors="replace"))
+
+            events = []
+            region = self.config.get_earthquake_region() if hasattr(self.config, "get_earthquake_region") else "Worldwide"
+            for feature in data.get("features", []):
+                props = feature.get("properties", {}) or {}
+                geom = feature.get("geometry", {}) or {}
+                coords = geom.get("coordinates") or []
+                if len(coords) < 3:
+                    continue
+                lon, lat, depth = coords[0], coords[1], coords[2]
+                mag = props.get("mag")
+                if mag is None:
+                    continue
+                try:
+                    mag = float(mag)
+                except Exception:
+                    continue
+                if mag < min_mag:
+                    continue
+
+                if region == "USA" and not (18 <= lat <= 72 and -170 <= lon <= -60):
+                    continue
+                if region == "North America" and not (5 <= lat <= 83 and -170 <= lon <= -45):
+                    continue
+
+                events.append({
+                    "mag": mag,
+                    "place": props.get("place", "Unknown location"),
+                    "time": props.get("time"),
+                    "url": props.get("url", ""),
+                    "id": feature.get("id", props.get("code", "")),
+                    "lat": lat,
+                    "lon": lon,
+                    "depth": depth,
+                })
+
+            self._earthquake_cache = events
+            self._earthquake_cache_time = now
+            return events
+        except Exception as e:
+            print(f"[Earthquake] USGS feed unavailable: {e}")
+            return getattr(self, "_earthquake_cache", [])
+
+    def _earthquake_color(self, mag: float) -> str:
+        # Earthquake colors intentionally avoid station status colors.
+        if mag >= 7.0:
+            return "#ffffff"   # white
+        if mag >= 6.0:
+            return "#ff00ff"   # magenta
+        if mag >= 5.0:
+            return "#8a2be2"   # purple
+        if mag >= 4.0:
+            return "#2f7bff"   # blue
+        return "#00e5ff"       # cyan
+
+    def _add_earthquakes_to_map(self, m) -> None:
+        """Add optional USGS earthquake markers to the folium map."""
+        try:
+            if not (hasattr(self.config, "get_earthquake_layer") and self.config.get_earthquake_layer()):
+                return
+
+            fg = folium.FeatureGroup(name="USGS Earthquakes", overlay=True, control=True, show=True)
+            for eq in self._fetch_earthquake_events():
+                mag = eq["mag"]
+                color = self._earthquake_color(mag)
+                radius = max(5, min(18, 4 + mag * 1.8))
+                t = eq.get("time")
+                if t:
+                    try:
+                        t_str = datetime.fromtimestamp(int(t) / 1000, timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+                    except Exception:
+                        t_str = "Unknown"
+                else:
+                    t_str = "Unknown"
+
+                popup_html = f"""
+                <div style='font-family:Arial,sans-serif;background:rgba(20,20,20,.96);color:#f5f5f5;
+                            padding:8px 10px;border:1px solid #777;border-radius:6px;min-width:210px;'>
+                    <div style='font-weight:bold;font-size:14px;color:{color};'>M{mag:.1f} Earthquake</div>
+                    <div><b>Location:</b> {eq.get('place','Unknown')}</div>
+                    <div><b>Depth:</b> {eq.get('depth','?')} km</div>
+                    <div><b>UTC:</b> {t_str}</div>
+                    <div><b>USGS ID:</b> {eq.get('id','')}</div>
+                    <div style='margin-top:5px;'><a href='{eq.get('url','')}' target='_blank' style='color:#8fd3ff;'>Open USGS Event</a></div>
+                </div>
+                """
+                folium.CircleMarker(
+                    location=[eq["lat"], eq["lon"]],
+                    radius=radius,
+                    color="#ff3333" if mag >= 7.0 else color,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.72,
+                    opacity=0.95,
+                    weight=2,
+                    popup=folium.Popup(popup_html, max_width=280),
+                    tooltip=f"M{mag:.1f} {eq.get('place','')}"
+                ).add_to(fg)
+            fg.add_to(m)
+        except Exception as e:
+            print(f"[Earthquake] map overlay failed: {e}")
+
     def _load_map(self, callback=None) -> None:
         """Generate and display the folium map with StatRep pins."""
         filters = self.config.filter_settings
@@ -4382,6 +4968,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # matters — with Leaflet's default zoomSnap=1, every wheel tick rounds
         # up to a full zoom level no matter how small the per-tick delta is.
         m = folium.Map(
+            tiles=None,
             zoom_start=self.map_zoom,
             location=self.map_center,
             wheelPxPerZoomLevel=MAP_WHEEL_PX_PER_ZOOM,
@@ -4397,15 +4984,50 @@ class MainWindow(QtWidgets.QMainWindow):
             control=False
         ).add_to(m)
 
-        # Add online tile layer (OpenStreetMap) for zoom > 8, only if internet available
+        # Add online tile layer (CartoDB Dark Matter) for zoom > 8, only if internet available
         if self._internet_available:
             folium.raster_layers.TileLayer(
-                tiles='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                name='OpenStreetMap',
-                attr='OpenStreetMap',
-                min_zoom=8,
+                tiles=('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' if self.config.get_map_theme() == 'dark' else 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
+                name='CartoDB Dark Matter',
+                attr='CartoDB',
+                min_zoom=1,
                 control=False
             ).add_to(m)
+
+
+        # Optional online weather radar overlay. Disabled automatically when offline.
+        if self._internet_available and self.config.get_weather_radar():
+            folium.raster_layers.TileLayer(
+                tiles='https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0r/{z}/{x}/{y}.png',
+                name='Weather Radar',
+                attr='NOAA NEXRAD',
+                overlay=True,
+                control=False,
+                opacity=0.55
+            ).add_to(m)
+
+            if self.config.get_show_radar_timestamp():
+                radar_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+                radar_timestamp_html = f"""
+                <div style="
+                    position: fixed;
+                    bottom: 12px;
+                    right: 12px;
+                    z-index: 9999;
+                    background: rgba(0, 0, 0, 0.78);
+                    color: #F0EAD6;
+                    border: 1px solid #3B4B2A;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-family: Arial, sans-serif;
+                    font-size: 11px;
+                    font-weight: bold;
+                    box-shadow: 0 0 6px rgba(0,0,0,0.6);
+                ">
+                    NOAA/NEXRAD Radar Updated: {radar_timestamp}
+                </div>
+                """
+                m.get_root().html.add_child(folium.Element(radar_timestamp_html))
 
         # Bounding boxes used to count pins per region for status-bar indicators
         # (lat_min, lat_max, lng_min, lng_max). Boxes can overlap; a pin near a
@@ -4456,20 +5078,59 @@ class MainWindow(QtWidgets.QMainWindow):
                         lon += count * 0.01
                     gridlist.append(grid)
 
-                    # Create popup HTML
-                    sr_date = row[1][:10] if row[1] else ""
-                    html = f'''<HTML style="height:100%;">
-                        <BODY style="margin:0;font-family:Arial,sans-serif;text-align:center;
-                                     height:100%;display:flex;flex-direction:column;
-                                     justify-content:center;align-items:center;">
-                            <p style="font-size:15px;font-weight:bold;margin:0 0 2px 0;">{callsign}</p>
-                            <p style="font-size:15px;font-weight:normal;margin:0 0 4px 0;">{sr_date}</p>
-                            <a href="http://localhost/statrep/{statrep_id}/{callsign}"
-                               style="font-size:15px;color:#0000EE;">Details</a>
+                    # Create tactical quick-info popup HTML.
+                    # Details link still opens the original full StatRep window.
+                    sr_dt = row[1][:16] if row[1] else ""
+                    freq_text = f"{row[2]:.3f} MHz" if row[2] else ""
+                    group_text = str(row[4]).lstrip("@") if row[4] else ""
+                    status_label = {
+                        "1": "Normal",
+                        "2": "Advisory",
+                        "3": "Emergency",
+                        "4": "Unknown"
+                    }.get(status, "Unknown")
+                    status_color = {
+                        "1": "#39d12f",
+                        "2": "#ff9f1a",
+                        "3": "#ff3333",
+                        "4": "#c7c7c7"
+                    }.get(status, "#c7c7c7")
+                    comment_preview = (row[20] or "").strip()
+                    if len(comment_preview) > 58:
+                        comment_preview = comment_preview[:55] + "..."
+                    html = f'''<HTML>
+                        <BODY style="margin:0;background:transparent;font-family:Arial,sans-serif;">
+                            <div style="
+                                width:190px;
+                                min-height:138px;
+                                box-sizing:border-box;
+                                background:linear-gradient(145deg,rgba(18,18,18,.96),rgba(46,46,46,.94));
+                                color:#f5f5f5;
+                                border:1px solid rgba(255,255,255,.18);
+                                border-radius:10px;
+                                padding:10px 12px 9px 12px;
+                                box-shadow:0 0 18px rgba(0,0,0,.65);
+                            ">
+                                <div style="font-size:20px;font-weight:900;line-height:22px;margin-bottom:2px;">{callsign}</div>
+                                <div style="font-size:12px;font-weight:800;color:{status_color};margin-bottom:8px;">Status: {status_label}</div>
+                                <table style="width:100%;border-collapse:collapse;font-size:12px;line-height:17px;color:#f5f5f5;">
+                                    <tr><td style="color:#d9d9d9;width:48px;">Scope:</td><td>{scope}</td></tr>
+                                    <tr><td style="color:#d9d9d9;">Grid:</td><td>{grid}</td></tr>
+                                    <tr><td style="color:#d9d9d9;">Time:</td><td>{sr_dt}</td></tr>
+                                    <tr><td style="color:#d9d9d9;">Freq:</td><td>{freq_text}</td></tr>
+                                    <tr><td style="color:#d9d9d9;">Group:</td><td>{group_text}</td></tr>
+                                </table>
+                                <div style="font-size:11px;color:#dcdcdc;margin-top:6px;min-height:15px;">{comment_preview}</div>
+                                <div style="border-top:1px solid rgba(255,255,255,.22);margin:8px 0 7px 0;"></div>
+                                <div style="text-align:center;">
+                                    <a href="http://localhost/statrep/{statrep_id}/{callsign}"
+                                       style="font-size:14px;font-weight:800;color:#2fa7ff;text-decoration:none;">Details</a>
+                                </div>
+                            </div>
                         </BODY>
                     </HTML>'''
-                    iframe = folium.IFrame(html, width=120, height=78)
-                    popup = folium.Popup(iframe, min_width=80, max_width=120)
+                    iframe = folium.IFrame(html, width=208, height=172)
+                    popup = folium.Popup(iframe, min_width=208, max_width=208)
 
                     # Skip green pins when filter is active
                     if self._hide_green_pins and status == "1":
@@ -4499,11 +5160,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     radius = SCOPE_RADIUS.get(scope, SCOPE_RADIUS_DEFAULT)
 
+                    # Slow pulse halo goes underneath the solid marker.
+                    # Halo radius grows with scope; solid is always 8px (radius 4).
+                    # interactive=False prevents the halo from stealing clicks from the popup marker.
                     folium.CircleMarker(
                         radius=radius,
                         fill=True,
                         color=color,
                         fill_color=color,
+                        fill_opacity=0.22,
+                        opacity=0,
+                        weight=2,
+                        location=[lat, lon],
+                        interactive=False
+                    ).add_to(m)
+
+                    # Solid status marker stays on top and remains clickable.
+                    folium.CircleMarker(
+                        radius=3,
+                        fill=True,
+                        color=color,
+                        fill_color=color,
+                        fill_opacity=1.0,
+                        opacity=0,
+                        weight=1,
                         location=[lat, lon],
                         popup=popup
                     ).add_to(m)
@@ -4517,11 +5197,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self._region_pin_counts = region_counts
         self._update_region_button_pin_indicators()
 
+        self._add_earthquakes_to_map(m)
+
         # Save map to bytes and display
         map_data = io.BytesIO()
         m.save(map_data, close_file=False)
 
         map_html = map_data.getvalue().decode()
+        pulse_css = """
+<style>
+@keyframes commstatMarkerSlowPulse {
+  0%   { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .72; }
+  50%  { filter: drop-shadow(0 0 7px currentColor); opacity: 1.00; }
+  100% { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .72; }
+}
+/* Leaflet renders CircleMarker objects as SVG paths with this class. */
+.leaflet-overlay-pane svg path.leaflet-interactive {
+  animation: commstatMarkerSlowPulse 2.4s ease-in-out infinite !important;
+}
+.leaflet-popup-content-wrapper {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  padding: 0 !important;
+}
+.leaflet-popup-content {
+  margin: 0 !important;
+}
+.leaflet-popup-tip {
+  background: rgba(25,25,25,.96) !important;
+}
+</style>
+"""
+        try:
+            map_html = map_html.replace("</head>", pulse_css + "</head>", 1)
+        except Exception:
+            pass
+
+
+        # Soft pulse for RED status pins
+        pulse_css = """
+<style>
+@keyframes commstatPulseRed {
+  0% {opacity:0.45;}
+  50% {opacity:1.0;}
+  100% {opacity:0.45;}
+}
+path[fill="red"], circle[fill="red"] {
+  animation: commstatPulseRed 1.8s ease-in-out infinite;
+}
+</style>
+"""
+        map_html = map_html.replace("</head>", pulse_css + "</head>")
 
         # Circle marker popups open on click and auto-close after 3 seconds.
         hover_js = """<script>
@@ -5231,6 +5958,122 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         self._load_statrep_data()
         self._save_map_position(callback=self._load_map)
 
+    def _set_map_theme(self, theme):
+        try:
+            self.config.set_map_theme(theme)
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Map theme switch failed: {e}")
+
+
+
+    def _set_weather_radar(self, checked: bool):
+        try:
+            enabled = bool(checked and self._internet_available)
+            self.config.set_weather_radar(enabled)
+            if hasattr(self, "map_radar_action"):
+                self.map_radar_action.setChecked(enabled)
+                self.map_radar_action.setEnabled(self._internet_available)
+            self._restart_radar_refresh_timer()
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Weather radar switch failed: {e}")
+
+
+    def _sync_weather_radar_action(self) -> None:
+        if hasattr(self, "map_radar_action"):
+            if not self._internet_available:
+                self.map_radar_action.setChecked(False)
+                self.map_radar_action.setEnabled(False)
+            else:
+                self.map_radar_action.setEnabled(True)
+                self.map_radar_action.setChecked(self.config.get_weather_radar())
+
+
+    def _setup_radar_refresh_timer(self) -> None:
+        if not hasattr(self, "radar_refresh_timer"):
+            self.radar_refresh_timer = QTimer(self)
+            self.radar_refresh_timer.timeout.connect(self._refresh_weather_radar)
+        self._restart_radar_refresh_timer()
+
+
+    def _restart_radar_refresh_timer(self) -> None:
+        if not hasattr(self, "radar_refresh_timer"):
+            return
+        self.radar_refresh_timer.stop()
+        minutes = self.config.get_weather_radar_refresh()
+        if self._internet_available and self.config.get_weather_radar() and minutes > 0:
+            self.radar_refresh_timer.start(minutes * 60 * 1000)
+
+
+    def _refresh_weather_radar(self) -> None:
+        if self._internet_available and self.config.get_weather_radar():
+            self._save_map_position(callback=self._load_map)
+
+
+    def _set_weather_radar_refresh(self, minutes: int) -> None:
+        self.config.set_weather_radar_refresh(minutes)
+        if hasattr(self, "map_radar_refresh_actions"):
+            for value, action in self.map_radar_refresh_actions.items():
+                action.setChecked(value == minutes)
+        self._restart_radar_refresh_timer()
+
+
+    def _set_show_radar_timestamp(self, checked: bool) -> None:
+        self.config.set_show_radar_timestamp(bool(checked))
+        self._save_map_position(callback=self._load_map)
+
+
+
+    def _set_earthquake_layer(self, checked: bool) -> None:
+        try:
+            enabled = bool(checked and self._internet_available)
+            self.config.set_earthquake_layer(enabled)
+            if hasattr(self, "map_earthquake_action"):
+                self.map_earthquake_action.setChecked(enabled)
+                self.map_earthquake_action.setEnabled(self._internet_available)
+            self._earthquake_cache = []
+            self._earthquake_cache_time = 0
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Earthquake layer switch failed: {e}")
+
+    def _set_earthquake_region(self, region: str) -> None:
+        try:
+            self.config.set_earthquake_region(region)
+            if hasattr(self, "map_eq_region_actions"):
+                for value, action in self.map_eq_region_actions.items():
+                    action.setChecked(value == region)
+            self._earthquake_cache = []
+            self._earthquake_cache_time = 0
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Earthquake region switch failed: {e}")
+
+    def _set_earthquake_min_mag(self, mag: float) -> None:
+        try:
+            self.config.set_earthquake_min_mag(float(mag))
+            if hasattr(self, "map_eq_mag_actions"):
+                for value, action in self.map_eq_mag_actions.items():
+                    action.setChecked(abs(float(value) - float(mag)) < 0.01)
+            self._earthquake_cache = []
+            self._earthquake_cache_time = 0
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Earthquake magnitude switch failed: {e}")
+
+    def _set_earthquake_refresh(self, minutes: int) -> None:
+        try:
+            self.config.set_earthquake_refresh(int(minutes))
+            if hasattr(self, "map_eq_refresh_actions"):
+                for value, action in self.map_eq_refresh_actions.items():
+                    action.setChecked(value == minutes)
+            self._earthquake_cache = []
+            self._earthquake_cache_time = 0
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Earthquake refresh switch failed: {e}")
+
     def _on_toggle_hide_green_pins(self, checked: bool) -> None:
         """Hide green (all-clear) statreps from table and map. Session-only — resets on restart."""
         self._hide_green_pins = checked
@@ -5508,43 +6351,6 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         self._refresh_all_data()
 
 
-    def _create_menu_checkbox(self, menu, label: str, is_checked: bool, handler) -> QtWidgets.QCheckBox:
-        """Create a styled checkbox as a menu item and add it to the given menu."""
-        panel_bg = self.config.get_color('module_background')
-        panel_fg = self.config.get_color('module_foreground')
-        checked_color = self.config.get_color('menu_background')
-        checkbox = QtWidgets.QCheckBox(label)
-        checkbox.setChecked(is_checked)
-        _cb_font = QtGui.QFont("Roboto")
-        _cb_font.setPixelSize(13)
-        checkbox.setFont(_cb_font)
-        checkbox.setStyleSheet(f"""
-            QCheckBox {{
-                padding: 4px 8px;
-                background-color: {panel_bg};
-                color: {panel_fg};
-                font-family: Roboto;
-                font-size: 13px;
-            }}
-            QCheckBox::indicator {{
-                width: 14px;
-                height: 14px;
-                background-color: white;
-                border: 1px solid #555555;
-                border-radius: 2px;
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {checked_color};
-                border: 1px solid {checked_color};
-                border-radius: 2px;
-            }}
-        """)
-        checkbox.stateChanged.connect(lambda state: handler(state == Qt.Checked))
-        action = QtWidgets.QWidgetAction(self)
-        action.setDefaultWidget(checkbox)
-        menu.addAction(action)
-        return checkbox
-
     def _populate_groups_menu(self) -> None:
         """Remove any stale group label actions from the Config menu."""
         # Indices 0-9 are the permanent Config items (settings actions, the
@@ -5560,42 +6366,14 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
             self.filter_menu.removeAction(action)
         self.filter_group_actions.clear()
 
-        panel_bg = self.config.get_color('module_background')
-        panel_fg = self.config.get_color('module_foreground')
-        checked_color = self.config.get_color('menu_background')
-
         unchecked = set(self.config.get_unchecked_groups())
         for name in self.db.get_all_groups():
-            checkbox = QtWidgets.QCheckBox(name)
-            checkbox.setChecked(name not in unchecked)
-            checkbox.setStyleSheet(f"""
-                QCheckBox {{
-                    padding: 4px 8px;
-                    background-color: {panel_bg};
-                    color: {panel_fg};
-                    font-family: Roboto;
-                    font-size: 13px;
-                }}
-                QCheckBox::indicator {{
-                    width: 14px;
-                    height: 14px;
-                    background-color: white;
-                    border: 1px solid #555555;
-                    border-radius: 2px;
-                }}
-                QCheckBox::indicator:checked {{
-                    background-color: {checked_color};
-                    border: 1px solid {checked_color};
-                    border-radius: 2px;
-                }}
-            """)
-            checkbox.stateChanged.connect(
-                lambda state, g=name: self._on_toggle_group_filter(g, state == Qt.Checked)
-            )
-            widget_action = QtWidgets.QWidgetAction(self)
-            widget_action.setDefaultWidget(checkbox)
-            self.filter_menu.insertAction(self.show_every_group_action, widget_action)
-            self.filter_group_actions[name] = widget_action
+            action = QtWidgets.QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(name not in unchecked)
+            action.triggered.connect(lambda checked, g=name: self._on_toggle_group_filter(g, checked))
+            self.filter_menu.insertAction(self.show_every_group_action, action)
+            self.filter_group_actions[name] = action
 
     def _on_js8_connectors(self) -> None:
         """Open JS8 Connectors management window."""
@@ -6775,7 +7553,10 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         def fetch_image():
             """Background thread: fetch image from URL."""
             try:
-                request = urllib.request.Request(image_url)
+                request = urllib.request.Request(
+                    image_url,
+                    headers={'User-Agent': 'CommStat/2.5'}
+                )
                 with urllib.request.urlopen(request, timeout=15, context=create_insecure_ssl_context()) as response:
                     fetch_result['data'] = response.read()
             except Exception as e:
@@ -6807,6 +7588,161 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
 # =============================================================================
 # Application Entry Point
 # =============================================================================
+
+
+    def _apply_user_font(self) -> None:
+        """Apply configured application font without changing pane/window geometry."""
+        try:
+            family = self.config.get_font_family() if hasattr(self.config, "get_font_family") else "Segoe UI"
+            size = self.config.get_font_size() if hasattr(self.config, "get_font_size") else 9
+            font = QtGui.QFont(family, size)
+            qApp.setFont(font)
+            self.setFont(font)
+            for widget in self.findChildren(QtWidgets.QWidget):
+                try:
+                    widget.setFont(font)
+                except Exception:
+                    pass
+            if hasattr(self, 'newsfeed_label'):
+                _ticker_font = QtGui.QFont("Kode Mono", -1)
+                _ticker_font.setPixelSize(15)
+                self.newsfeed_label.setFont(_ticker_font)
+        except Exception as e:
+            print(f"[Theme] Font apply failed: {e}")
+
+    def _on_theme_manager(self) -> None:
+        """Open Theme Manager."""
+        dlg = ThemeManagerDialog(self.config, self._apply_theme_styles, self)
+        dlg.exec_()
+
+
+
+
+    def _apply_theme_styles(self) -> None:
+        """Apply changed theme colors to the active UI without rebuilding the whole window."""
+        try:
+            if hasattr(self, "central_widget"):
+                self.central_widget.setStyleSheet(
+                    f"background-color: {self.config.get_color('program_background')};"
+                )
+
+            # Menu bar and menus
+            if hasattr(self, "menubar"):
+                menu_bg = self.config.get_color('menu_background')
+                menu_fg = self.config.get_color('menu_foreground')
+                panel_bg = self.config.get_color('module_background')
+                panel_fg = self.config.get_color('module_foreground')
+                self.menubar.setStyleSheet(f"""
+                    QMenuBar {{
+                        background-color: {menu_bg};
+                        color: {menu_fg};
+                        font-family: Roboto;
+                        font-size: 13px;
+                        font-weight: bold;
+                    }}
+                    QMenuBar::item {{ padding: 6px 8px; }}
+                    QMenuBar::item:selected {{ background-color: {menu_bg}; }}
+                    QMenu {{
+                        background-color: {panel_bg};
+                        color: {panel_fg};
+                        font-family: Roboto;
+                        font-size: 13px;
+                    }}
+                    QMenu::item {{
+                        font-family: Roboto;
+                        font-size: 13px;
+                        padding: 3px 12px;
+                    }}
+                    QMenu::item:selected {{
+                        background-color: {menu_bg};
+                        color: {menu_fg};
+                    }}
+                    QMenu::item:disabled {{
+                        background-color: {menu_bg};
+                        color: {menu_fg};
+                        font-weight: bold;
+                    }}
+                """)
+
+            # Header labels and controls
+            fg_color = self.config.get_color('program_foreground')
+            menu_bg = self.config.get_color('menu_background')
+            menu_fg = self.config.get_color('menu_foreground')
+            if hasattr(self, "label_newsfeed"):
+                self.label_newsfeed.setStyleSheet(f"color: {fg_color};")
+            if hasattr(self, "label_time_prefix"):
+                self.label_time_prefix.setStyleSheet(f"color: {fg_color};")
+            if hasattr(self, "newsfeed_label"):
+                self.newsfeed_label.setStyleSheet(
+                    f"background-color: {self.config.get_color('newsfeed_background')};"
+                    f"color: {self.config.get_color('newsfeed_foreground')};"
+                )
+            if hasattr(self, "time_label"):
+                self.time_label.setStyleSheet(
+                    f"background-color: {self.config.get_color('time_background')};"
+                    f"color: {self.config.get_color('time_foreground')};"
+                )
+            combo_qss = f"""
+                QComboBox {{
+                    background-color: {menu_bg};
+                    color: {menu_fg};
+                    border: 1px solid {menu_fg};
+                    padding: 2px 5px;
+                }}
+                QComboBox::drop-down {{ border: none; }}
+            """
+            if hasattr(self, "feed_combo"):
+                self.feed_combo.setStyleSheet(combo_qss)
+            if hasattr(self, "last20_button"):
+                self.last20_button.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {menu_bg};
+                        color: {menu_fg};
+                        border: 1px solid {menu_fg};
+                        padding: 2px 5px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {menu_fg};
+                        color: {menu_bg};
+                    }}
+                """)
+
+            # Tables
+            if hasattr(self, "statrep_table"):
+                self._setup_table_widget(self.statrep_table, STATREP_HEADERS)
+            if hasattr(self, "message_table"):
+                self._setup_table_widget(self.message_table, [
+                    "", "Date Time", "Freq", "From", "To", "ID",
+                    self.message_table.horizontalHeaderItem(6).text() if self.message_table.horizontalHeaderItem(6) else "0 Messages"
+                ])
+            if hasattr(self, "contacts_table"):
+                headers = [
+                    "Callsign", "Name", "Address", "City", "State",
+                    "Zip", "Country", "Grid", "Class", "Email", "Image", "Date Added",
+                    "Delete"
+                ]
+                self._setup_table_widget(self.contacts_table, headers)
+
+            # Live feed / map-disabled / alert display
+            if hasattr(self, "feed_text"):
+                self.feed_text.setStyleSheet(
+                    f"background-color: {self.config.get_color('feed_background')};"
+                    f"color: {self.config.get_color('feed_foreground')};"
+                )
+            if hasattr(self, "map_disabled_label"):
+                self.map_disabled_label.setStyleSheet(
+                    f"background-color: {self.config.get_color('feed_background')};"
+                    f"color: {self.config.get_color('feed_foreground')};"
+                    "font-size: 18px; font-weight: bold;"
+                )
+            if hasattr(self, "_load_map"):
+                self._save_map_position(callback=self._load_map)
+
+        except Exception as e:
+            print(f"Theme apply failed: {e}")
+
+
+
 
 def main() -> None:
     """Application entry point."""

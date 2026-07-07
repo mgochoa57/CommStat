@@ -414,6 +414,23 @@ class AlertDialog(QDialog):
         except sqlite3.Error:
             return ""
 
+    def _get_internet_user_settings(self) -> tuple:
+        """Return (callsign, gridsquare, state) from User Settings."""
+        try:
+            with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT callsign, gridsquare, state FROM controls WHERE id = 1")
+                row = cursor.fetchone()
+                if row:
+                    return (
+                        (row[0] or "").strip().upper(),
+                        (row[1] or "").strip(),
+                        (row[2] or "").strip().upper(),
+                    )
+        except sqlite3.Error:
+            pass
+        return ("", "", "")
+
     def _on_mode_changed(self, index: int) -> None:
         rig_name = self.rig_combo.currentText()
         if not rig_name or rig_name == INTERNET_RIG or "(disconnected)" in rig_name:
@@ -600,13 +617,15 @@ class AlertDialog(QDialog):
 
     def _save_only(self) -> None:
         if self.rig_combo.currentText() == INTERNET_RIG:
-            self.callsign = self._get_internet_callsign()
-            if not self.callsign:
+            callsign, grid, state = self._get_internet_user_settings()
+            if not callsign or not grid or not state:
                 self._show_error(
-                    "No callsign configured.\n\n"
-                    "Please set your callsign in Settings → User Settings."
+                    "Cannot transmit — User Settings are not fully configured.\n\n"
+                    "Please set your callsign, grid square, and state at:\n"
+                    "Menu → Config → User Settings"
                 )
                 return
+            self.callsign = callsign
         elif not self.callsign:
             self._show_error(
                 "Callsign not yet received from the rig.\n\n"
@@ -632,10 +651,12 @@ class AlertDialog(QDialog):
         callsign, color, title, message = result
 
         if rig_name == INTERNET_RIG:
-            callsign = self._get_internet_callsign()
-            if not callsign:
+            callsign, grid, state = self._get_internet_user_settings()
+            if not callsign or not grid or not state:
                 self._show_error(
-                    "No callsign configured.\n\nPlease set your callsign in Settings → User Settings."
+                    "Cannot transmit — User Settings are not fully configured.\n\n"
+                    "Please set your callsign, grid square, and state at:\n"
+                    "Menu → Config → User Settings"
                 )
                 return
             self.callsign = callsign

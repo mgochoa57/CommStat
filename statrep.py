@@ -1442,10 +1442,12 @@ class StatRepDialog(QDialog):
         rig_name = self.rig_combo.currentText()
 
         if rig_name == INTERNET_RIG:
-            callsign, _, _ = self._get_internet_user_settings()
-            if not callsign:
+            callsign, grid, state = self._get_internet_user_settings()
+            if not callsign or not grid or not state:
                 self._show_error(
-                    "No callsign configured.\n\nPlease set your callsign in Settings → User Settings."
+                    "Cannot transmit — User Settings are not fully configured.\n\n"
+                    "Please set your callsign, grid square, and state at:\n"
+                    "Menu → Config → User Settings"
                 )
                 return
             self.callsign = callsign
