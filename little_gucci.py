@@ -2896,6 +2896,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
         self.tools_menu.addSeparator()
+        create_action(self.tools_menu, "Flock Camera Map", "flock_camera_map", self._on_flock_camera_map)
         create_action(self.tools_menu, "Live Radiation Map", "live_radiation_map", self._on_live_radiation_map)
         for label, key, url in [
             ("Real-Time Lightning",    "lightning_map",     "https://www.lightningmaps.org/"),
@@ -3434,6 +3435,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set_show_contacts(True)
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.show()
+                total = self.content_splitter.height()
+                feed_h = self.feed_text.height() if hasattr(self, 'feed_text') else 100
+                handle_px = self.content_splitter.handleWidth() * 3
+                statrep_h = max(100, total - feed_h - 340 - handle_px)
+                self.content_splitter.setSizes([statrep_h, feed_h, 0, 340])
                 self._load_contacts_data()
                 self.contacts_table.viewport().setFocus()
             else:
@@ -4946,7 +4952,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     fill_color=color,
                     fill_opacity=0.72,
                     opacity=0.95,
-                    weight=2,
+                    weight=2 if mag >= 7.0 else 0,
                     popup=folium.Popup(popup_html, max_width=280),
                     tooltip=f"M{mag:.1f} {eq.get('place','')}"
                 ).add_to(fg)
@@ -5042,6 +5048,7 @@ class MainWindow(QtWidgets.QMainWindow):
         US_BBOX = REGION_BBOX["us"]
         region_counts = {"us": 0, "eu": 0, "mideast": 0, "seasia": 0, "world": 0}
 
+        pin_registry = {}  # statrep_id -> [lat, lon] for bounce/pan; populated inside try
         # Get StatRep data for pins
         try:
             _map_callsign = next((cs for cs in self.rig_callsigns.values() if cs), "") or ""
@@ -5095,41 +5102,42 @@ class MainWindow(QtWidgets.QMainWindow):
                         "3": "#ff3333",
                         "4": "#c7c7c7"
                     }.get(status, "#c7c7c7")
-                    comment_preview = (row[20] or "").strip()
-                    if len(comment_preview) > 58:
-                        comment_preview = comment_preview[:55] + "..."
+                    _light_map = self.config.get_map_theme() == "light"
+                    _bg = ("linear-gradient(145deg,rgba(248,248,245,.97),rgba(235,235,230,.95))"
+                           if _light_map else
+                           "linear-gradient(145deg,rgba(18,18,18,.96),rgba(46,46,46,.94))")
+                    _text = "#1a1a1a" if _light_map else "#f5f5f5"
+                    _label = "#555555" if _light_map else "#d9d9d9"
+                    _border = "rgba(0,0,0,.18)" if _light_map else "rgba(255,255,255,.18)"
+                    _link_color = "#0055cc" if _light_map else "#ffffff"
                     html = f'''<HTML>
-                        <BODY style="margin:0;background:transparent;font-family:Arial,sans-serif;">
+                        <BODY style="margin:0;background:transparent;font-family:Roboto,Arial,sans-serif;">
                             <div style="
                                 width:190px;
-                                min-height:138px;
+                                min-height:130px;
                                 box-sizing:border-box;
-                                background:linear-gradient(145deg,rgba(18,18,18,.96),rgba(46,46,46,.94));
-                                color:#f5f5f5;
-                                border:1px solid rgba(255,255,255,.18);
+                                background:{_bg};
+                                color:{_text};
+                                border:1px solid {_border};
                                 border-radius:10px;
                                 padding:10px 12px 9px 12px;
                                 box-shadow:0 0 18px rgba(0,0,0,.65);
                             ">
-                                <div style="font-size:20px;font-weight:900;line-height:22px;margin-bottom:2px;">{callsign}</div>
-                                <div style="font-size:12px;font-weight:800;color:{status_color};margin-bottom:8px;">Status: {status_label}</div>
-                                <table style="width:100%;border-collapse:collapse;font-size:12px;line-height:17px;color:#f5f5f5;">
-                                    <tr><td style="color:#d9d9d9;width:48px;">Scope:</td><td>{scope}</td></tr>
-                                    <tr><td style="color:#d9d9d9;">Grid:</td><td>{grid}</td></tr>
-                                    <tr><td style="color:#d9d9d9;">Time:</td><td>{sr_dt}</td></tr>
-                                    <tr><td style="color:#d9d9d9;">Freq:</td><td>{freq_text}</td></tr>
-                                    <tr><td style="color:#d9d9d9;">Group:</td><td>{group_text}</td></tr>
+                                <div style="font-size:20px;font-weight:900;line-height:22px;margin-bottom:8px;">{callsign}</div>
+                                <table style="width:100%;border-collapse:collapse;font-size:12px;line-height:17px;color:{_text};">
+                                    <tr><td style="color:{_label};width:48px;">Scope:</td><td>{scope}</td></tr>
+                                    <tr><td style="color:{_label};">Freq:</td><td>{freq_text}</td></tr>
+                                    <tr><td style="color:{_label};">Group:</td><td>{group_text}</td></tr>
+                                    <tr><td style="color:{_label};">Date:</td><td>{sr_dt}</td></tr>
                                 </table>
-                                <div style="font-size:11px;color:#dcdcdc;margin-top:6px;min-height:15px;">{comment_preview}</div>
-                                <div style="border-top:1px solid rgba(255,255,255,.22);margin:8px 0 7px 0;"></div>
-                                <div style="text-align:center;">
+                                <div style="text-align:center;margin-top:2px;">
                                     <a href="http://localhost/statrep/{statrep_id}/{callsign}"
-                                       style="font-size:14px;font-weight:800;color:#2fa7ff;text-decoration:none;">Details</a>
+                                       style="font-size:14px;font-weight:800;color:{_link_color};text-decoration:underline;">Details</a>
                                 </div>
                             </div>
                         </BODY>
                     </HTML>'''
-                    iframe = folium.IFrame(html, width=208, height=172)
+                    iframe = folium.IFrame(html, width=208, height=148)
                     popup = folium.Popup(iframe, min_width=208, max_width=208)
 
                     # Skip green pins when filter is active
@@ -5187,6 +5195,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         location=[lat, lon],
                         popup=popup
                     ).add_to(m)
+                    pin_registry[str(statrep_id)] = [lat, lon]
                 except Exception as e:
                     print(f"Error adding pin for grid {grid}: {e}")
 
@@ -5207,9 +5216,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pulse_css = """
 <style>
 @keyframes commstatMarkerSlowPulse {
-  0%   { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .72; }
-  50%  { filter: drop-shadow(0 0 7px currentColor); opacity: 1.00; }
-  100% { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .72; }
+  0%   { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .40; }
+  50%  { filter: drop-shadow(0 0 14px currentColor); opacity: 1.00; }
+  100% { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .40; }
 }
 /* Leaflet renders CircleMarker objects as SVG paths with this class. */
 .leaflet-overlay-pane svg path.leaflet-interactive {
@@ -5250,34 +5259,31 @@ path[fill="red"], circle[fill="red"] {
 """
         map_html = map_html.replace("</head>", pulse_css + "</head>")
 
-        # Circle marker popups open on click and auto-close after 3 seconds.
+        bounce_css = """
+<style>
+@keyframes commstatBounce {
+  0%   { transform: scale(1.0); }
+  15%  { transform: scale(3.2); }
+  30%  { transform: scale(1.0); }
+  45%  { transform: scale(2.2); }
+  60%  { transform: scale(1.0); }
+  72%  { transform: scale(1.6); }
+  84%  { transform: scale(1.0); }
+  92%  { transform: scale(1.3); }
+  100% { transform: scale(1.0); }
+}
+/* Specificity 0-3-2 beats the pulse rule's 0-2-2 when both carry !important */
+.leaflet-overlay-pane svg path.leaflet-interactive.commstat-bounce {
+  transform-box: fill-box !important;
+  transform-origin: center !important;
+  animation: commstatBounce 1.1s cubic-bezier(.36,.07,.19,.97) forwards !important;
+}
+</style>
+"""
+        map_html = map_html.replace('</head>', bounce_css + '</head>')
+
+        # Circle marker popups open on click and stay until user clicks elsewhere.
         hover_js = """<script>
-window.addEventListener('load', function() {
-    setTimeout(function() {
-        Object.keys(window).forEach(function(key) {
-            var obj = window[key];
-            if (obj && obj._leaflet_id && obj.eachLayer) {
-                obj.eachLayer(function(layer) {
-                    if (layer.getPopup && layer.getPopup()) {
-                        layer._popupCloseTimer = null;
-                        layer.on('popupopen', function(e) {
-                            if (layer._popupCloseTimer) clearTimeout(layer._popupCloseTimer);
-                            layer._popupCloseTimer = setTimeout(function() {
-                                layer.closePopup();
-                            }, 3000);
-                        });
-                        layer.on('popupclose', function(e) {
-                            if (layer._popupCloseTimer) {
-                                clearTimeout(layer._popupCloseTimer);
-                                layer._popupCloseTimer = null;
-                            }
-                        });
-                    }
-                });
-            }
-        });
-    }, 500);
-});
 </script>"""
         webkit_shim = """<script>
 if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) {
@@ -5288,6 +5294,31 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
 </script>"""
         map_html = map_html.replace('</head>', webkit_shim + '\n</head>')
         map_html = map_html.replace('</body>', hover_js + '\n</body>')
+
+        bounce_js = '<script>\nwindow._commstatPinRegistry=' + json.dumps(pin_registry) + """;
+window.commstatBouncePin = function(srid) {
+    var target = window._commstatPinRegistry[String(srid)];
+    if (!target) return;
+    Object.keys(window).forEach(function(key) {
+        var obj = window[key];
+        if (!obj || !obj._leaflet_id || !obj.eachLayer || !obj.panTo) return;
+        obj.panTo([target[0], target[1]]);
+        obj.eachLayer(function(layer) {
+            if (!layer.getLatLng || !layer._path) return;
+            var ll = layer.getLatLng();
+            if (Math.abs(ll.lat - target[0]) < 0.0001 &&
+                    Math.abs(ll.lng - target[1]) < 0.0001) {
+                var el = layer._path;
+                el.classList.remove('commstat-bounce');
+                void el.getBoundingClientRect();
+                el.classList.add('commstat-bounce');
+                setTimeout(function() { el.classList.remove('commstat-bounce'); }, 1200);
+            }
+        });
+    });
+};
+</script>"""
+        map_html = map_html.replace('</body>', bounce_js + '\n</body>')
 
         # Always set new HTML content (reload() only refreshes cached content)
         self._last_map_html = map_html
@@ -5369,8 +5400,9 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
         self._populate_table(self.statrep_table, data, status_colors)
 
     def _on_statrep_click(self, item: QTableWidgetItem) -> None:
-        """From callsign (col 3) opens detail view; all other cells copy their text."""
+        """From callsign (col 3) opens detail view; ID (col 5) bounces map pin; others copy text."""
         _FROM_COL = 3
+        _ID_COL   = 5
         row = item.row()
 
         if item.column() == _FROM_COL:
@@ -5418,6 +5450,11 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                 )
                 if dlg.exec_() == 1:
                     self._load_statrep_data()
+        elif item.column() == _ID_COL:
+            record_id = item.data(QtCore.Qt.UserRole)
+            if record_id is not None and self.map_loaded:
+                js = f"if(window.commstatBouncePin)window.commstatBouncePin({json.dumps(str(record_id))});"
+                self.map_widget.page().runJavaScript(js)
         else:
             text = item.text().strip()
             if text:
@@ -5530,6 +5567,10 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
     def _on_live_better(self) -> None:
         """Open the Live Better page in the user's browser."""
         QDesktopServices.openUrl(QUrl("https://commstat.app/how-are-you-feeling.php"))
+
+    def _on_flock_camera_map(self) -> None:
+        """Open the Flock Camera Map (deflock.org) in the user's browser."""
+        QDesktopServices.openUrl(QUrl("https://maps.deflock.org/?lat=39.8283&lng=-98.5795&zoom=4.00"))
 
     def _on_live_radiation_map(self) -> None:
         """Open the Live Radiation Map (gmcmap.com) in the user's browser."""
@@ -6264,6 +6305,11 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                         font = item.font()
                         font.setBold(True)
                         item.setFont(font)
+                # Bold the statrep ID (col 5) — clickable for map bounce/pan.
+                elif is_statrep_table and col_num == 5:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
                 # Bold the message ID (col 5) with a "Delivered" tooltip once the
                 # commsrvr confirms delivery (delivered = 1 in the messages table).
                 elif is_message_table and col_num == 5 and len(row_data) > 8 and row_data[8]:
@@ -6284,6 +6330,11 @@ if (window.webkitStorageInfo === undefined && navigator.webkitTemporaryStorage) 
                 cs_item = table.item(row_num, 3)
                 if cs_item:
                     cs_item.setData(QtCore.Qt.UserRole, row_data[22])
+                # sr_id (col 5, displayed) is not unique across records; the map
+                # pin bounce must key off the unique statrep primary key instead.
+                id_item = table.item(row_num, 5)
+                if id_item:
+                    id_item.setData(QtCore.Qt.UserRole, row_data[22])
 
         # Alert table (non-statrep, non-message): sort by first column descending
         if not is_message_table and not is_statrep_table:
