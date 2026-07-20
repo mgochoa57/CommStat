@@ -81,7 +81,7 @@ from PyQt5.QtGui import QColor, QDesktopServices
 from PyQt5.QtWidgets import QTableWidgetItem
 from PyQt5.QtCore import QBuffer, QIODevice, QTimer, QDateTime, Qt, QUrl
 from PyQt5.QtWidgets import qApp
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineProfile
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PyQt5.QtWebEngineCore import QWebEngineUrlSchemeHandler, QWebEngineUrlScheme, QWebEngineUrlRequestJob
 from PyQt5.QtMultimedia import QSoundEffect
 from connector_manager import ConnectorManager
@@ -740,6 +740,89 @@ class ClickableLabel(QtWidgets.QLabel):
 # =============================================================================
 # Custom Web Engine Page for Map Links
 # =============================================================================
+
+# Video player page loaded into the map QWebEngineView. Uses the YouTube
+# IFrame Player API; end-of-video and the Skip button both navigate to
+# commstat://video-ended, which CustomWebEnginePage routes to _on_video_skip.
+# No autoplay: a transparent overlay (#tap) captures clicks anywhere on the
+# video and toggles play/pause; a centered play badge shows while paused.
+# The iframe is 190px taller than the page and shifted up 95px so YouTube's
+# edge-anchored chrome (paused-state share / "More videos" / "Watch on
+# YouTube" row at the bottom, title bar at the top) sits outside the visible
+# area; at the pane's 16:9 default size the crop only eats letterbox.
+_VIDEO_PLAYER_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}
+#player{position:absolute;top:-95px;left:0;width:100%;height:calc(100% + 190px);border:0;}
+#tap{position:absolute;top:0;left:0;width:100%;height:100%;z-index:5;cursor:pointer;}
+#playbadge{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+width:72px;height:72px;border-radius:50%;background:rgba(0,0,0,0.55);
+border:2px solid rgba(255,255,255,0.8);color:#fff;font-size:32px;
+display:flex;align-items:center;justify-content:center;pointer-events:none;
+font-family:sans-serif;padding-left:6px;}
+#skip{position:absolute;top:8px;right:8px;z-index:10;background:rgba(0,0,0,0.65);
+color:#fff;border:1px solid #999;border-radius:4px;padding:4px 12px;
+font-family:sans-serif;font-size:13px;cursor:pointer;}
+#skip:hover{background:rgba(40,167,69,0.85);}
+</style></head>
+<body>
+<div id="player"></div>
+<div id="tap"><div id="playbadge">&#9654;</div></div>
+<button id="skip" onclick="window.location='commstat://video-ended';">Skip &#9654;</button>
+<script>
+var tag = document.createElement('script');
+tag.src = "https://www.youtube.com/iframe_api";
+document.head.appendChild(tag);
+var player;
+function onYouTubeIframeAPIReady() {
+    player = new YT.Player('player', {
+        videoId: '__VIDEO_ID__',
+        playerVars: {autoplay: 0, rel: 0, controls: 0, disablekb: 1},
+        events: {
+            'onStateChange': function(e) {
+                document.getElementById('playbadge').style.display =
+                    (e.data === YT.PlayerState.PLAYING) ? 'none' : 'flex';
+                if (e.data === YT.PlayerState.ENDED) {
+                    window.location = 'commstat://video-ended';
+                }
+            }
+        }
+    });
+}
+document.getElementById('tap').onclick = function() {
+    if (!player || typeof player.getPlayerState !== 'function') { return; }
+    if (player.getPlayerState() === YT.PlayerState.PLAYING) {
+        player.pauseVideo();
+    } else {
+        player.playVideo();
+    }
+};
+</script>
+</body></html>"""
+
+# TEMP POC: Instagram reel player. Loads Instagram's /embed/ page in a
+# centered vertical iframe (reels are 9:16). Instagram's embed handles its
+# own click-to-play chrome, so there is no tap overlay here; Skip is the
+# only exit (no end-of-video event is available from the embed).
+_INSTAGRAM_PLAYER_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}
+#wrap{position:absolute;top:0;left:50%;transform:translateX(-50%);
+height:100%;aspect-ratio:9/16;}
+#player{width:100%;height:100%;border:0;}
+#skip{position:absolute;top:8px;right:8px;z-index:10;background:rgba(0,0,0,0.65);
+color:#fff;border:1px solid #999;border-radius:4px;padding:4px 12px;
+font-family:sans-serif;font-size:13px;cursor:pointer;}
+#skip:hover{background:rgba(40,167,69,0.85);}
+</style></head>
+<body>
+<div id="wrap"><iframe id="player" src="__IG_EMBED_URL__"
+allow="autoplay; encrypted-media" allowfullscreen></iframe></div>
+<button id="skip" onclick="window.location='commstat://video-ended';">Skip &#9654;</button>
+</body></html>"""
+
 
 class CustomWebEnginePage(QWebEnginePage):
     """Handles navigation requests from the map and video player."""
@@ -2478,6 +2561,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.map_stack.setObjectName("mapStack")
         self.map_stack.setMinimumSize(320, 180)
 
+        # Refit images/alert text after the pane is resized. Debounced via
+        # single-shot QTimer to avoid rescaling on every pixel of a drag.
+        self._map_pane_resize_timer = QTimer(self)
+        self._map_pane_resize_timer.setSingleShot(True)
+        self._map_pane_resize_timer.timeout.connect(self._on_map_pane_resized)
+        self.map_stack.installEventFilter(self)
+
         self.bottom_splitter.addWidget(self.map_stack)
         self.content_splitter.addWidget(self.bottom_splitter)
 
@@ -2558,21 +2648,22 @@ class MainWindow(QtWidgets.QMainWindow):
         elif not self._internet_available:
             print("Internet connectivity: Still not available (will retry in 30 minutes)")
 
-    def _setup_menu(self) -> None:
-        """Create the menu bar with all actions."""
-        self.menubar = QtWidgets.QMenuBar(self)
-        self.menubar.setNativeMenuBar(False)  # Use Qt menu bar, not native (fixes Linux)
-        self.setMenuBar(self.menubar)  # Explicitly set as main window's menu bar
-        self.menubar.setVisible(True)
-        self.menubar.setFixedHeight(30)
-        # Clear corner widgets that may interfere with menu layout on Linux
-        self.menubar.setCornerWidget(None, Qt.TopLeftCorner)
-        self.menubar.setCornerWidget(None, Qt.TopRightCorner)
+    def _menubar_qss(self) -> str:
+        """Shared stylesheet for the menu bar and all of its menus/submenus.
+
+        The QMenu::item background-color and the QMenu::indicator rules are
+        load-bearing: they force Qt's stylesheet engine to draw menu items
+        itself on every platform instead of delegating to the native style
+        (QMacStyle reserves a menu-wide check column and draws its own large
+        checkmark, which broke layout on macOS). With these rules, layout is
+        per-item everywhere: non-checkable items stay flush left, checkable
+        items get the square indicator (round for exclusive/radio groups).
+        """
         menu_bg = self.config.get_color('menu_background')
         menu_fg = self.config.get_color('menu_foreground')
         panel_bg = self.config.get_color('module_background')
         panel_fg = self.config.get_color('module_foreground')
-        self.menubar.setStyleSheet(f"""
+        return f"""
             QMenuBar {{
                 background-color: {menu_bg};
                 color: {menu_fg};
@@ -2596,24 +2687,56 @@ class MainWindow(QtWidgets.QMainWindow):
                 font-family: Roboto;
                 font-size: 13px;
                 padding: 3px 12px;
+                background-color: transparent;
             }}
             QMenu::item:selected {{
                 background-color: {menu_bg};
                 color: {menu_fg};
             }}
-        """)
+            QMenu::item:disabled {{
+                background-color: {menu_bg};
+                color: {menu_fg};
+                font-weight: bold;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {panel_fg};
+                margin: 4px 8px;
+            }}
+            QMenu::indicator {{
+                width: 12px;
+                height: 12px;
+                background-color: white;
+                border: 1px solid #7f7f7f;
+                border-radius: 2px;
+            }}
+            QMenu::indicator:checked {{
+                background-color: {menu_bg};
+                border: 1px solid {menu_bg};
+            }}
+            QMenu::indicator:exclusive {{
+                border-radius: 6px;
+            }}
+        """
 
-        # Section headers throughout the menus are disabled QActions; style them
-        # bold with the menu background/foreground colors. In each of these menus
+    def _setup_menu(self) -> None:
+        """Create the menu bar with all actions."""
+        self.menubar = QtWidgets.QMenuBar(self)
+        self.menubar.setNativeMenuBar(False)  # Use Qt menu bar, not native (fixes Linux)
+        self.setMenuBar(self.menubar)  # Explicitly set as main window's menu bar
+        self.menubar.setVisible(True)
+        self.menubar.setFixedHeight(30)
+        # Clear corner widgets that may interfere with menu layout on Linux
+        self.menubar.setCornerWidget(None, Qt.TopLeftCorner)
+        self.menubar.setCornerWidget(None, Qt.TopRightCorner)
+        # Section headers throughout the menus are disabled QActions; the shared
+        # stylesheet's QMenu::item:disabled rule styles them bold. In each menu
         # the disabled items are exclusively section titles.
-        section_header_qss = (
-            f"QMenu::item:disabled {{ background-color: {menu_bg}; color: {menu_fg}; font-weight: bold; }}"
-        )
+        self.menubar.setStyleSheet(self._menubar_qss())
 
         # Create the main menu
         self.menu = _MenuBarMenu("Config", self.menubar)
         self.menubar.addMenu(self.menu)
-        self.menu.setStyleSheet(section_header_qss)
 
         # Define menu actions: (name, text, handler)
         menu_items = [
@@ -2664,7 +2787,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Create the Transmit menu
         self.transmit_menu = _MenuBarMenu("Transmit", self.menubar)
         self.menubar.addMenu(self.transmit_menu)
-        self.transmit_menu.setStyleSheet(section_header_qss)
 
         hybrid_lbl = QtWidgets.QAction("Hybrid Tools", self)
         hybrid_lbl.setEnabled(False)
@@ -2708,7 +2830,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Create the Filter menu
         self.filter_menu = _MenuBarMenu("Filter", self.menubar)
         self.menubar.addMenu(self.filter_menu)
-        self.filter_menu.setStyleSheet(section_header_qss)
 
         # Helper to create styled menu checkboxes
 
@@ -2775,9 +2896,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Map theme menu
         self.map_theme_menu = _MenuBarMenu("Map", self.menubar)
         self.menubar.addMenu(self.map_theme_menu)
-        self.map_theme_menu.setStyleSheet(
-            "QMenu::item:disabled { background-color: #1a5fa8; color: white; font-weight: bold; }"
-        )
 
         map_overlay_label = QtWidgets.QAction("Map Overlay Options", self)
         map_overlay_label.setEnabled(False)
@@ -2869,7 +2987,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Create Tools dropdown menu
         self.tools_menu = _MenuBarMenu("Tools", self.menubar)
         self.menubar.addMenu(self.tools_menu)
-        self.tools_menu.setStyleSheet(section_header_qss)
 
         # Helper to create menu actions
         def create_action(menu, label, key, handler):
@@ -2948,12 +3065,13 @@ class MainWindow(QtWidgets.QMainWindow):
             ("SE Asia", "seasia"),
             ("World", "world"),
             ("Images", "images"),
+            ("Videos", "videos"),
             ("Alerts", "alerts"),
             ("Contacts", "contacts"),
         ]:
             btn = QtWidgets.QPushButton(label)
             btn.setFixedHeight(18)
-            btn.setFixedWidth(70)
+            btn.setFixedWidth(68)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda checked, m=mode: self._set_map_view_mode(m))
             self.statusbar.addWidget(btn)
@@ -2963,6 +3081,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusbar.addWidget(hint_label)
 
         # Quick-link buttons after the divider, styled with the menu colors.
+        menu_bg = self.config.get_color('menu_background')
+        menu_fg = self.config.get_color('menu_foreground')
         for label, url in [
             ("Weather", "https://www.ventusky.com/"),
             ("Radiation", "https://gmcmap.com/"),
@@ -3240,6 +3360,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Image slideshow state
         self.slideshow_items: List[str] = []
         self.slideshow_index: int = 0
+        self._slideshow_source_pixmap: Optional[QtGui.QPixmap] = None
 
         # Timer for slideshow
         self.slideshow_timer = QtCore.QTimer(self)
@@ -3373,7 +3494,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Non-region buttons are styled directly; region buttons go through
         # _update_region_button_pin_indicators so they can show orange when
         # an inactive region has pins on it.
-        for m in ("images", "alerts", "contacts"):
+        for m in ("images", "videos", "alerts", "contacts"):
             btn = getattr(self, f"_btn_{m}", None)
             if btn:
                 btn.setStyleSheet(ACTIVE if m == mode else INACTIVE)
@@ -3385,14 +3506,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.map_zoom = zoom
             self._last_map_region = mode
             self._stop_slideshow()
-            self.bottom_splitter.show()
+            self._show_bottom_section()
             self.map_stack.setCurrentWidget(self.map_widget)
-            self.map_stack.setMinimumSize(604, 340)
-            self.map_stack.setMaximumSize(16777215, 16777215)
-            self.map_stack.setSizePolicy(
-                QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
-            self.bottom_splitter.setMinimumHeight(340)
-            self.bottom_splitter.setMaximumHeight(16777215)
+            self._unlock_map_pane()
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.hide()
             if hasattr(self, 'message_table'):
@@ -3403,9 +3519,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_map()
         elif mode == "images":
             self._stop_slideshow()
-            self.bottom_splitter.show()
+            self._show_bottom_section()
             self.map_stack.setCurrentWidget(self.map_disabled_label)
-            self._snap_map_pane()
+            self._unlock_map_pane()
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.hide()
             if hasattr(self, 'message_table'):
@@ -3414,10 +3530,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set_hide_map(True)
             self.config.set_show_alerts(False)
             self.config.set_show_contacts(False)
+        elif mode == "videos":
+            self._stop_slideshow()
+            self._show_bottom_section()
+            self.map_stack.setCurrentWidget(self.map_widget)
+            self._unlock_map_pane()
+            if hasattr(self, 'contacts_widget'):
+                self.contacts_widget.hide()
+            if hasattr(self, 'message_table'):
+                self.message_table.show()
+            # Transient mode: not persisted, so a relaunch never starts in video
+            self.config.set_hide_map(False)
+            self.config.set_show_alerts(False)
+            self.config.set_show_contacts(False)
+            self._play_video_poc()
         elif mode == "alerts":
             self._stop_slideshow()
-            self.bottom_splitter.show()
-            self._snap_map_pane()
+            self._show_bottom_section()
+            self._unlock_map_pane()
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.hide()
             if hasattr(self, 'message_table'):
@@ -3429,36 +3559,54 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_alert_display()
         elif mode == "contacts":
             self._stop_slideshow()
+            # Remember the pane height so it can be restored when leaving Contacts
+            if not self.bottom_splitter.isHidden():
+                self._saved_map_pane_height = self.bottom_splitter.height()
             self.bottom_splitter.hide()
             self.config.set_hide_map(True)
             self.config.set_show_alerts(False)
             self.config.set_show_contacts(True)
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.show()
+                # Give the contacts view the same height the pane had
+                pane_h = getattr(self, '_saved_map_pane_height', 0) or 340
                 total = self.content_splitter.height()
                 feed_h = self.feed_text.height() if hasattr(self, 'feed_text') else 100
                 handle_px = self.content_splitter.handleWidth() * 3
-                statrep_h = max(100, total - feed_h - 340 - handle_px)
-                self.content_splitter.setSizes([statrep_h, feed_h, 0, 340])
+                statrep_h = max(100, total - feed_h - pane_h - handle_px)
+                self.content_splitter.setSizes([statrep_h, feed_h, 0, pane_h])
                 self._load_contacts_data()
                 self.contacts_table.viewport().setFocus()
             else:
                 QTimer.singleShot(0, lambda: self._set_map_view_mode("contacts"))
 
-    def _snap_map_pane(self) -> None:
-        """Lock the map pane to exactly 604 × 340 for alerts/images modes."""
-        self.map_stack.setFixedSize(604, 340)
-        self.bottom_splitter.setFixedHeight(340)
-        # Give any freed vertical space back to the statrep table so there is
-        # no gap between the bottom section and the window edge.
-        total = self.content_splitter.height()
-        feed_h = self.feed_text.height() if hasattr(self, 'feed_text') else 100
-        handle_px = self.content_splitter.handleWidth() * 2
-        statrep_h = max(100, total - feed_h - 340 - handle_px)
-        self.content_splitter.setSizes([statrep_h, feed_h, 340])
-        QTimer.singleShot(0, lambda: self.bottom_splitter.setSizes(
-            [604, max(100, self.bottom_splitter.width() - 604 - self.bottom_splitter.handleWidth())]
-        ))
+    def _unlock_map_pane(self, min_w: int = 604, min_h: int = 340) -> None:
+        """Make the lower-left pane splitter-resizable with the given minimum."""
+        self.map_stack.setMinimumSize(min_w, min_h)
+        self.map_stack.setMaximumSize(16777215, 16777215)
+        self.map_stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.bottom_splitter.setMinimumHeight(min_h)
+        self.bottom_splitter.setMaximumHeight(16777215)
+
+    def _show_bottom_section(self) -> None:
+        """Show the bottom splitter, restoring the operator's pane height when
+        returning from the Contacts view (which hides the whole section).
+        Splitter sizes are otherwise left alone so a user resize survives
+        switching between map, images, alerts, and video."""
+        returning = self.bottom_splitter.isHidden()
+        self.bottom_splitter.show()
+        saved_h = getattr(self, '_saved_map_pane_height', 0)
+        if returning and hasattr(self, 'contacts_widget') and self.contacts_widget.isVisible():
+            # Carry over any resize the user made while in the Contacts view
+            saved_h = self.contacts_widget.height() or saved_h
+            self._saved_map_pane_height = saved_h
+        if returning and saved_h:
+            total = self.content_splitter.height()
+            feed_h = self.feed_text.height() if hasattr(self, 'feed_text') else 100
+            handle_px = self.content_splitter.handleWidth() * 2
+            statrep_h = max(100, total - feed_h - saved_h - handle_px)
+            self.content_splitter.setSizes([statrep_h, feed_h, saved_h])
 
     def _update_region_button_pin_indicators(self) -> None:
         """
@@ -3487,11 +3635,46 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 btn.setStyleSheet(INACTIVE)
 
+    def _alert_font_scale(self) -> float:
+        """Font scale proportional to the pane size, relative to the default
+        604 x 340 pane. Measures map_stack (not alert_display) because a stack
+        page that isn't current yet still has stale geometry."""
+        w, h = self.map_stack.width(), self.map_stack.height()
+        if w < 50 or h < 50:
+            # Not laid out yet
+            return 1.0
+        return max(0.55, min(2.5, min(w / MAP_WIDTH, h / MAP_HEIGHT)))
+
+    def _fit_alert_message(self, base_pt: float) -> None:
+        """Shrink the message font until the wrapped text fits the space left
+        over after the title, date, and nav-button rows."""
+        label = self.alert_message_label
+        avail = (self.map_stack.height()
+                 - self.alert_title_label.sizeHint().height()
+                 - self.alert_date_label.sizeHint().height()
+                 - 30    # nav-button row
+                 - 50)   # layout margins/spacing
+        if avail <= 0:
+            return
+        # Pane width minus the alert layout's side margins (map_stack, not the
+        # label, because the label's geometry is stale before the page shows)
+        width = max(self.map_stack.width() - 22, 100)
+        font = label.font()
+        pt = base_pt
+        while pt > 8:
+            font.setPointSizeF(pt)
+            label.setFont(font)
+            # heightForWidth lays out the wrapped rich text at the given width
+            if label.heightForWidth(width) <= avail:
+                break
+            pt -= 1
+
     def _show_alert_display(self) -> None:
         """Show the alert display with the current alert from database."""
         # Get total alert count and fetch alert at current index
         alert_count = self.db.get_alert_count()
         alert = self.db.get_alert_at_offset(self.alert_index)
+        scale = self._alert_font_scale()
 
         # Update navigation button states
         self.alert_prev_btn.setEnabled(self.alert_index > 0)
@@ -3525,18 +3708,24 @@ class MainWindow(QtWidgets.QMainWindow):
             if group:
                 # Show group + ALERT at top, then title in bold below (strip @ symbol)
                 group_display = group.lstrip('@')
-                formatted_title = f'<div style="font-family: \'Kode Mono\'; font-size: 22px; font-weight: bold; margin-top: -6px;">@{group_display} - ALERT</div>'
+                formatted_title = f'<div style="font-family: \'Kode Mono\'; font-size: {round(22 * scale)}px; font-weight: bold; margin-top: {round(-6 * scale)}px;">@{group_display} - ALERT</div>'
                 if title:
-                    formatted_title += f'<div style="font-family: \'Roboto Slab\'; font-size: 30px; font-weight: 900; margin-top: 18px;">{title}</div>'
+                    formatted_title += f'<div style="font-family: \'Roboto Slab\'; font-size: {round(30 * scale)}px; font-weight: 900; margin-top: {round(18 * scale)}px;">{title}</div>'
             else:
                 # No group, just show title in bold
-                formatted_title = f'<div style="font-family: \'Roboto Slab\'; font-size: 26px; font-weight: 900;">{title if title else ""}</div>'
+                formatted_title = f'<div style="font-family: \'Roboto Slab\'; font-size: {round(26 * scale)}px; font-weight: 900;">{title if title else ""}</div>'
 
             self.alert_display.setStyleSheet(f"background-color: {bg_color};")
             self.alert_title_label.setStyleSheet(f"color: {text_color};")
             self.alert_message_label.setStyleSheet(f"color: {text_color}; font-family: Roboto;")
             self.alert_date_label.setStyleSheet(f"color: {text_color}; font-family: Roboto;")
             self.alert_title_label.setText(formatted_title)
+            message_font = self.alert_message_label.font()
+            message_font.setPointSizeF(18 * scale)
+            self.alert_message_label.setFont(message_font)
+            date_font = self.alert_date_label.font()
+            date_font.setPixelSize(max(10, round(19 * scale)))
+            self.alert_date_label.setFont(date_font)
             _parts = re.split(r'(https?://\S+)', message)
             _msg_html = "".join(
                 f'<a href="{p.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}"'
@@ -3548,12 +3737,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.alert_message_label.setText(_msg_html)
             self.alert_date_label.setText(date_line)
+            self._fit_alert_message(18 * scale)
         else:
             # No alerts - show placeholder
             self.alert_display.setStyleSheet("background-color: #333333;")
             self.alert_title_label.setStyleSheet("color: #ffffff;")
             self.alert_message_label.setStyleSheet("color: #ffffff; font-family: Roboto;")
             self.alert_date_label.setStyleSheet("color: #ffffff; font-family: Roboto;")
+            title_font = self.alert_title_label.font()
+            title_font.setPointSizeF(24 * scale)
+            self.alert_title_label.setFont(title_font)
             self.alert_title_label.setText("No Alerts")
             self.alert_message_label.setText("")
             self.alert_date_label.setText("")
@@ -4390,6 +4583,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_current_image()
             self.slideshow_timer.start()
         else:
+            self._slideshow_source_pixmap = None
             self.map_disabled_label.setPixmap(QtGui.QPixmap())
             self.map_disabled_label.setText("Map Disabled")
 
@@ -4403,11 +4597,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         image_path = self.slideshow_items[self.slideshow_index]
-        pixmap = QtGui.QPixmap(image_path)
+        self._slideshow_source_pixmap = QtGui.QPixmap(image_path)
+        self._rescale_slideshow_image()
 
-        # Scale to fit while maintaining aspect ratio
+    def _rescale_slideshow_image(self) -> None:
+        """Scale the current slideshow image to the label's current size."""
+        pixmap = self._slideshow_source_pixmap
+        if pixmap is None or pixmap.isNull():
+            return
+        # Measure the pane, not the label - the label's geometry is stale if
+        # its stack page wasn't showing when the pane was resized
+        target = self.map_stack.size()
+        if target.width() < 50 or target.height() < 50:
+            # Not laid out yet - fall back to the default pane size
+            target = QtCore.QSize(MAP_WIDTH, MAP_HEIGHT)
         scaled_pixmap = pixmap.scaled(
-            MAP_WIDTH, MAP_HEIGHT,
+            target,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation
         )
@@ -5330,6 +5535,34 @@ window.commstatBouncePin = function(srid) {
         if callback:
             callback()
 
+    # TEMP POC: hardcoded video id; Phase 2 will take the URL from the videos table
+    def _play_video_poc(self) -> None:
+        self._play_video("A3cMU55dIIc")
+        # Instagram POC kept for reference — embed loads but playback fails:
+        # Instagram serves H.264 only and QtWebEngine's open Chromium build
+        # has no proprietary codecs (YouTube works via VP9/Opus).
+        # self._play_instagram("https://www.instagram.com/reel/Da-1pOuulP4/")
+
+    def _play_video(self, video_id: str) -> None:
+        """Play a YouTube video in the map pane; the map returns on end/skip."""
+        # Make sure the web view is the visible pane in the map stack
+        if self.map_stack.currentWidget() is not self.map_widget:
+            self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
+        html = _VIDEO_PLAYER_HTML.replace("__VIDEO_ID__", video_id)
+        self.map_widget.setHtml(html, QUrl("http://localhost/"))
+
+    def _play_instagram(self, reel_url: str) -> None:
+        """TEMP POC: show an Instagram reel in the map pane via its /embed/ page."""
+        if self.map_stack.currentWidget() is not self.map_widget:
+            self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
+        embed_url = reel_url.split("?")[0].rstrip("/") + "/embed/"
+        html = _INSTAGRAM_PLAYER_HTML.replace("__IG_EMBED_URL__", embed_url)
+        self.map_widget.setHtml(html, QUrl("http://localhost/"))
+
+    def _on_video_skip(self) -> None:
+        """Video ended or Skip clicked (commstat://video-ended): restore the map."""
+        self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
+
     def _save_map_position(self, callback=None) -> None:
         """Save current map center and zoom via JavaScript."""
         if not self.map_loaded:
@@ -5846,11 +6079,21 @@ window.commstatBouncePin = function(srid) {
             self.newsfeed_label.setText("  News feed error")
 
     def eventFilter(self, obj, event):
-        """Watch for newsfeed_label resizes to refresh ticker length."""
+        """Watch for newsfeed_label and map pane resizes to refit content."""
         if obj is getattr(self, 'newsfeed_label', None) and event.type() == QtCore.QEvent.Resize:
             # Debounce: restart the timer so we only refresh once the drag settles.
             self._newsfeed_resize_timer.start(150)
+        elif obj is getattr(self, 'map_stack', None) and event.type() == QtCore.QEvent.Resize:
+            self._map_pane_resize_timer.start(150)
         return super().eventFilter(obj, event)
+
+    def _on_map_pane_resized(self) -> None:
+        """Refit the map pane's content once a resize settles."""
+        mode = getattr(self, '_current_view_mode', None)
+        if mode == "images":
+            self._rescale_slideshow_image()
+        elif mode == "alerts":
+            self._show_alert_display()
 
     def _refresh_newsfeed_for_resize(self) -> None:
         """Recompute and restart the current headline at the new label width."""
@@ -7679,41 +7922,7 @@ window.commstatBouncePin = function(srid) {
 
             # Menu bar and menus
             if hasattr(self, "menubar"):
-                menu_bg = self.config.get_color('menu_background')
-                menu_fg = self.config.get_color('menu_foreground')
-                panel_bg = self.config.get_color('module_background')
-                panel_fg = self.config.get_color('module_foreground')
-                self.menubar.setStyleSheet(f"""
-                    QMenuBar {{
-                        background-color: {menu_bg};
-                        color: {menu_fg};
-                        font-family: Roboto;
-                        font-size: 13px;
-                        font-weight: bold;
-                    }}
-                    QMenuBar::item {{ padding: 6px 8px; }}
-                    QMenuBar::item:selected {{ background-color: {menu_bg}; }}
-                    QMenu {{
-                        background-color: {panel_bg};
-                        color: {panel_fg};
-                        font-family: Roboto;
-                        font-size: 13px;
-                    }}
-                    QMenu::item {{
-                        font-family: Roboto;
-                        font-size: 13px;
-                        padding: 3px 12px;
-                    }}
-                    QMenu::item:selected {{
-                        background-color: {menu_bg};
-                        color: {menu_fg};
-                    }}
-                    QMenu::item:disabled {{
-                        background-color: {menu_bg};
-                        color: {menu_fg};
-                        font-weight: bold;
-                    }}
-                """)
+                self.menubar.setStyleSheet(self._menubar_qss())
 
             # Header labels and controls
             fg_color = self.config.get_color('program_foreground')
@@ -7826,6 +8035,12 @@ def main() -> None:
     # Install tile scheme handler on the default profile
     _tile_handler = TileSchemeHandler("tilesPNG2")
     QWebEngineProfile.defaultProfile().installUrlSchemeHandler(b'tiles', _tile_handler)
+
+    # Allow media autoplay in web views (video playback starts without an
+    # in-page click; play is triggered from the app UI instead)
+    _web_settings = QWebEngineProfile.defaultProfile().settings()
+    _web_settings.setAttribute(QWebEngineSettings.PlaybackRequiresUserGesture, False)
+    _web_settings.setAttribute(QWebEngineSettings.FullScreenSupportEnabled, True)
 
     # Set tooltip colors to match Windows (tan background, black text)
     app.setStyleSheet("QToolTip { background-color: #FFFFE1; color: black; border: 1px solid black; }")
