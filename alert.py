@@ -60,7 +60,7 @@ _PANEL_FG = DEFAULT_COLORS.get("module_foreground",    "#000000")
 _COL_CANCEL = "#555555"
 
 _WIN_W = 640
-_WIN_H = 360
+_WIN_H = 440
 
 CALLSIGN_PATTERN = re.compile(r'[A-Z0-9]{1,3}[0-9][A-Z]{1,3}')
 

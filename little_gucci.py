@@ -741,15 +741,38 @@ class ClickableLabel(QtWidgets.QLabel):
 # Custom Web Engine Page for Map Links
 # =============================================================================
 
+_YOUTUBE_ID_RE = re.compile(
+    r'(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:watch\?v=|embed/|shorts/))'
+    r'([A-Za-z0-9_-]{11})'
+)
+
+
+def _extract_youtube_id(url: str) -> Optional[str]:
+    """Pull the 11-char video id out of a YouTube watch/share/embed URL."""
+    match = _YOUTUBE_ID_RE.search(url or "")
+    return match.group(1) if match else None
+
+
 # Video player page loaded into the map QWebEngineView. Uses the YouTube
-# IFrame Player API; end-of-video and the Skip button both navigate to
-# commstat://video-ended, which CustomWebEnginePage routes to _on_video_skip.
-# No autoplay: a transparent overlay (#tap) captures clicks anywhere on the
-# video and toggles play/pause; a centered play badge shows while paused.
-# The iframe is 190px taller than the page and shifted up 95px so YouTube's
+# IFrame Player API; end-of-video navigates to commstat://video-ended (map
+# buttons are the way back to the map, so there's no on-screen exit control),
+# Prev/Next navigate to commstat://video-prev / commstat://video-next, and
+# Delete navigates to commstat://video-delete — CustomWebEnginePage routes
+# these to _on_video_ended / _on_video_prev / _on_video_next /
+# _on_video_delete. No autoplay: a transparent overlay (#tap) captures
+# clicks anywhere on the video and toggles play/pause; a centered play
+# badge shows while paused. The title overlays the top of the video and a
+# "Date Sent / Sent By" meta line (same format as the Alerts panel)
+# overlays the bottom, both in white so the user can see what's loaded;
+# both disappear once playback starts (same paused/not-paused toggle as
+# the play badge). Prev/Next
+# (bottom corners) and Delete (bottom center) stay hidden until the mouse
+# is over the pane (body:hover) so they don't clutter the video. The
+# iframe is 190px taller than the page and shifted up 95px so YouTube's
 # edge-anchored chrome (paused-state share / "More videos" / "Watch on
-# YouTube" row at the bottom, title bar at the top) sits outside the visible
-# area; at the pane's 16:9 default size the crop only eats letterbox.
+# YouTube" row at the bottom, title bar at the top) sits outside the
+# visible area; at the pane's 16:9 default size the crop only eats
+# letterbox.
 _VIDEO_PLAYER_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -761,15 +784,40 @@ width:72px;height:72px;border-radius:50%;background:rgba(0,0,0,0.55);
 border:2px solid rgba(255,255,255,0.8);color:#fff;font-size:32px;
 display:flex;align-items:center;justify-content:center;pointer-events:none;
 font-family:sans-serif;padding-left:6px;}
-#skip{position:absolute;top:8px;right:8px;z-index:10;background:rgba(0,0,0,0.65);
-color:#fff;border:1px solid #999;border-radius:4px;padding:4px 12px;
-font-family:sans-serif;font-size:13px;cursor:pointer;}
-#skip:hover{background:rgba(40,167,69,0.85);}
+#title{position:absolute;top:20px;left:0;width:100%;box-sizing:border-box;
+padding:10px 14px;z-index:8;color:#fff;font-family:Roboto,sans-serif;
+font-size:19px;font-weight:bold;text-align:center;
+background:linear-gradient(rgba(0,0,0,0.65),rgba(0,0,0,0));
+text-shadow:0 1px 3px rgba(0,0,0,0.8);pointer-events:none;}
+#title:empty{display:none;}
+#meta{position:absolute;bottom:56px;left:0;width:100%;box-sizing:border-box;
+padding:0 14px;z-index:8;color:#fff;font-family:Roboto,sans-serif;
+font-size:__VIDEO_META_SIZE__px;text-align:center;text-shadow:0 1px 3px rgba(0,0,0,0.8);
+pointer-events:none;}
+#meta:empty{display:none;}
+#prev,#next{position:absolute;bottom:8px;z-index:10;
+opacity:0;pointer-events:none;transition:opacity .15s ease;
+background:rgba(0,0,0,0.65);color:#fff;border:1px solid #999;
+border-radius:4px;padding:4px 12px;font-family:sans-serif;font-size:13px;cursor:pointer;}
+#prev{left:8px;}
+#next{right:8px;}
+#prev:hover,#next:hover{background:rgba(40,167,69,0.85);}
+#delete{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:10;
+opacity:0;pointer-events:none;transition:opacity .15s ease;
+background:rgba(220,53,69,0.85);color:#fff;font-family:Roboto,sans-serif;
+font-size:13px;font-weight:bold;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;}
+#delete:hover{background:rgba(200,35,51,0.9);}
+#delete:active{background:rgba(189,33,48,0.95);}
+body:hover #prev,body:hover #next,body:hover #delete{opacity:1;pointer-events:auto;}
 </style></head>
 <body>
 <div id="player"></div>
 <div id="tap"><div id="playbadge">&#9654;</div></div>
-<button id="skip" onclick="window.location='commstat://video-ended';">Skip &#9654;</button>
+<div id="title">__VIDEO_TITLE__</div>
+<div id="meta">__VIDEO_META__</div>
+<button id="prev" onclick="window.location='commstat://video-prev';">&#9664; Prev</button>
+<button id="next" onclick="window.location='commstat://video-next';">Next &#9654;</button>
+<button id="delete" onclick="window.location='commstat://video-delete';">Delete</button>
 <script>
 var tag = document.createElement('script');
 tag.src = "https://www.youtube.com/iframe_api";
@@ -781,8 +829,12 @@ function onYouTubeIframeAPIReady() {
         playerVars: {autoplay: 0, rel: 0, controls: 0, disablekb: 1},
         events: {
             'onStateChange': function(e) {
-                document.getElementById('playbadge').style.display =
-                    (e.data === YT.PlayerState.PLAYING) ? 'none' : 'flex';
+                var playing = (e.data === YT.PlayerState.PLAYING);
+                var titleEl = document.getElementById('title');
+                var metaEl = document.getElementById('meta');
+                document.getElementById('playbadge').style.display = playing ? 'none' : 'flex';
+                titleEl.style.display = (playing || !titleEl.textContent.trim()) ? 'none' : 'block';
+                metaEl.style.display = (playing || !metaEl.textContent.trim()) ? 'none' : 'block';
                 if (e.data === YT.PlayerState.ENDED) {
                     window.location = 'commstat://video-ended';
                 }
@@ -842,9 +894,25 @@ class CustomWebEnginePage(QWebEnginePage):
 
         # Handle video-ended event
         if url_str == "commstat://video-ended":
-            if hasattr(self.parent_widget, '_on_video_skip'):
-                self.parent_widget._on_video_skip()
+            if hasattr(self.parent_widget, '_on_video_ended'):
+                self.parent_widget._on_video_ended()
             return False  # Prevent navigation
+
+        # Handle video Prev/Next navigation
+        if url_str == "commstat://video-prev":
+            if hasattr(self.parent_widget, '_on_video_prev'):
+                self.parent_widget._on_video_prev()
+            return False
+        if url_str == "commstat://video-next":
+            if hasattr(self.parent_widget, '_on_video_next'):
+                self.parent_widget._on_video_next()
+            return False
+
+        # Handle video Delete
+        if url_str == "commstat://video-delete":
+            if hasattr(self.parent_widget, '_on_video_delete'):
+                self.parent_widget._on_video_delete()
+            return False
 
         # Open USGS earthquake event links in the user's browser.
         if url.scheme() in ("http", "https") and "earthquake.usgs.gov" in url.host():
@@ -2057,6 +2125,55 @@ class DatabaseManager:
                 return (result[0], result[1], result[2], result[3], result[4] or "", result[5] or "")
             return None
         return self._execute(op, None)
+
+    def get_media_count(self) -> int:
+        """Get the total number of rows in the media table."""
+        def op(cursor, conn):
+            cursor.execute("SELECT COUNT(*) FROM media")
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        return self._execute(op, 0)
+
+    def get_media_at_offset(self, offset: int) -> Optional[Tuple[int, str, str, str, str]]:
+        """Get (id, url, title, datetime, from_callsign) of the media row at
+        the given offset from most recent (0 = latest), or None."""
+        def op(cursor, conn):
+            cursor.execute(
+                "SELECT id, url, title, datetime, from_callsign "
+                "FROM media ORDER BY datetime DESC LIMIT 1 OFFSET ?",
+                (offset,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return (result[0], result[1], result[2] or "", result[3] or "", result[4] or "")
+            return None
+        return self._execute(op, None)
+
+    def mark_media_played(self, media_id: int) -> None:
+        """Mark a media row as played."""
+        def op(cursor, conn):
+            cursor.execute("UPDATE media SET played = 1 WHERE id = ?", (media_id,))
+            conn.commit()
+        self._execute(op)
+
+    def delete_media_at_offset(self, offset: int) -> bool:
+        """Delete the media row at the specified offset from most recent."""
+        def op(cursor, conn):
+            cursor.execute(
+                "DELETE FROM media WHERE id = ("
+                "SELECT id FROM media ORDER BY datetime DESC LIMIT 1 OFFSET ?)",
+                (offset,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        return self._execute(op, False)
+
+    def has_unplayed_media(self) -> bool:
+        """True if any media row has played = 0."""
+        def op(cursor, conn):
+            cursor.execute("SELECT 1 FROM media WHERE played = 0 LIMIT 1")
+            return cursor.fetchone() is not None
+        return self._execute(op, False)
 
 
 # =============================================================================
@@ -3355,6 +3472,29 @@ class MainWindow(QtWidgets.QMainWindow):
             f"background-color: {bg_color}; color: {fg_color}; font-size: 18px; font-weight: bold;"
         )
 
+        # Prev/Next step through the slideshow (alphabetical order); only
+        # visible while the mouse is over the frame - same overlay style
+        # and hover behavior as the video player and Alerts nav buttons.
+        _NAV_BTN_QSS = (
+            "QPushButton { background-color: rgba(0,0,0,0.65); color: white;"
+            " font-family: sans-serif; font-size: 13px; border: 1px solid #999;"
+            " border-radius: 4px; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: rgba(40,167,69,0.85); }"
+        )
+        self.image_prev_btn = QtWidgets.QPushButton("◀ Prev", self.map_disabled_label)
+        self.image_prev_btn.setStyleSheet(_NAV_BTN_QSS)
+        self.image_prev_btn.clicked.connect(lambda: self._image_navigate(-1))
+
+        self.image_next_btn = QtWidgets.QPushButton("Next ▶", self.map_disabled_label)
+        self.image_next_btn.setStyleSheet(_NAV_BTN_QSS)
+        self.image_next_btn.clicked.connect(lambda: self._image_navigate(1))
+
+        self._image_hovering = False
+        self.image_prev_btn.hide()
+        self.image_next_btn.hide()
+
+        self.map_disabled_label.installEventFilter(self)
+
         self.map_stack.addWidget(self.map_disabled_label)
 
         # Image slideshow state
@@ -3421,37 +3561,46 @@ class MainWindow(QtWidgets.QMainWindow):
         date_font.setPixelSize(19)
         self.alert_date_label.setFont(date_font)
         alert_layout.addWidget(self.alert_date_label)
-        alert_layout.addSpacing(10)
+        alert_layout.addSpacing(46)
 
-        # Bottom row: nav buttons centered, delete button at right
-        bottom_layout = QtWidgets.QHBoxLayout()
+        # Prev/Next/Delete float directly on alert_display (not in
+        # alert_layout) so they can be pinned to the corners/bottom-center —
+        # mirrors the video player's overlay Prev/Next/Delete buttons.
+        # _reposition_alert_nav_buttons keeps them pinned on resize.
+        # Same size/style as the video player's Prev/Next overlay buttons
+        # (rgba(0,0,0,0.65), 1px #999 border, 4px radius, green hover) —
+        # auto-sized to content like their HTML/CSS counterparts, not fixed.
+        _NAV_BTN_QSS = (
+            "QPushButton { background-color: rgba(0,0,0,0.65); color: white;"
+            " font-family: sans-serif; font-size: 13px; border: 1px solid #999;"
+            " border-radius: 4px; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: rgba(40,167,69,0.85); }"
+        )
+        self.alert_prev_btn = QtWidgets.QPushButton("◀ Prev", self.alert_display)
+        self.alert_prev_btn.setStyleSheet(_NAV_BTN_QSS)
+        self.alert_prev_btn.clicked.connect(lambda: self._alert_navigate(1))
 
-        self.alert_prev_btn = QtWidgets.QPushButton("<")
-        self.alert_prev_btn.setFixedSize(40, 30)
-        self.alert_prev_btn.setStyleSheet("QPushButton { font-size: 16px; font-weight: bold; background-color: white; color: #000000; }")
-        self.alert_prev_btn.clicked.connect(lambda: self._alert_navigate(-1))
+        self.alert_next_btn = QtWidgets.QPushButton("Next ▶", self.alert_display)
+        self.alert_next_btn.setStyleSheet(_NAV_BTN_QSS)
+        self.alert_next_btn.clicked.connect(lambda: self._alert_navigate(-1))
 
-        self.alert_next_btn = QtWidgets.QPushButton(">")
-        self.alert_next_btn.setFixedSize(40, 30)
-        self.alert_next_btn.setStyleSheet("QPushButton { font-size: 16px; font-weight: bold; background-color: white; color: #000000; }")
-        self.alert_next_btn.clicked.connect(lambda: self._alert_navigate(1))
-
-        self.alert_delete_btn = QtWidgets.QPushButton("Delete")
+        self.alert_delete_btn = QtWidgets.QPushButton("Delete", self.alert_display)
         self.alert_delete_btn.setStyleSheet(
-            "QPushButton { background-color: #dc3545; color: white; font-family: Roboto; font-size: 13px; font-weight: bold; border-radius: 4px; padding: 4px 12px; }"
-            "QPushButton:hover { background-color: #c82333; }"
-            "QPushButton:pressed { background-color: #bd2130; }"
+            "QPushButton { background-color: rgba(220,53,69,0.85); color: white; font-family: Roboto; font-size: 13px; font-weight: bold; border: none; border-radius: 4px; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: rgba(200,35,51,0.9); }"
+            "QPushButton:pressed { background-color: rgba(189,33,48,0.95); }"
         )
         self.alert_delete_btn.clicked.connect(self._alert_delete)
 
-        bottom_layout.addStretch(1)
-        bottom_layout.addWidget(self.alert_prev_btn)
-        bottom_layout.addSpacing(20)
-        bottom_layout.addWidget(self.alert_next_btn)
-        bottom_layout.addStretch(1)
-        bottom_layout.addWidget(self.alert_delete_btn)
+        # Prev/Next/Delete only show while the mouse is over the frame -
+        # mirrors the video player's body:hover behavior.
+        self._alert_hovering = False
+        self._alert_has_alert = False
+        self.alert_prev_btn.hide()
+        self.alert_next_btn.hide()
+        self.alert_delete_btn.hide()
 
-        alert_layout.addLayout(bottom_layout)
+        self.alert_display.installEventFilter(self)
 
         # Default styling (will be updated when alert is displayed)
         self.alert_display.setStyleSheet("background-color: #333333;")
@@ -3460,6 +3609,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.alert_date_label.setStyleSheet("color: #ffffff; font-family: Roboto;")
 
         self.map_stack.addWidget(self.alert_display)
+
+    def _reposition_alert_nav_buttons(self) -> None:
+        """Pin Prev (bottom-left), Next (bottom-right), and Delete
+        (bottom-center) over the alert display's current size — matches the
+        video player's bottom-row Prev/Next/Delete layout."""
+        w = self.alert_display.width()
+        h = self.alert_display.height()
+        margin = 8
+        self.alert_prev_btn.resize(self.alert_prev_btn.sizeHint())
+        self.alert_next_btn.resize(self.alert_next_btn.sizeHint())
+        self.alert_prev_btn.move(margin, h - self.alert_prev_btn.height() - margin)
+        self.alert_next_btn.move(w - self.alert_next_btn.width() - margin,
+                                  h - self.alert_next_btn.height() - margin)
+        del_size = self.alert_delete_btn.sizeHint()
+        self.alert_delete_btn.resize(del_size)
+        self.alert_delete_btn.move((w - del_size.width()) // 2, h - del_size.height() - margin)
+        for btn in (self.alert_prev_btn, self.alert_next_btn, self.alert_delete_btn):
+            btn.raise_()
+
+    def _update_alert_nav_visibility(self) -> None:
+        """Show Prev/Next/Delete only while the mouse is over the alert
+        frame - mirrors the video player's body:hover behavior."""
+        hovering = self._alert_hovering
+        self.alert_prev_btn.setVisible(hovering)
+        self.alert_next_btn.setVisible(hovering)
+        self.alert_delete_btn.setVisible(hovering and self._alert_has_alert)
 
     def _setup_map_view_buttons(self) -> None:
         """Apply initial map view state (buttons live in the status bar)."""
@@ -3491,13 +3666,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._current_view_mode = mode
 
-        # Non-region buttons are styled directly; region buttons go through
-        # _update_region_button_pin_indicators so they can show orange when
-        # an inactive region has pins on it.
-        for m in ("images", "videos", "alerts", "contacts"):
+        # Non-region, non-Videos buttons are styled directly; region buttons
+        # go through _update_region_button_pin_indicators and Videos through
+        # _update_video_button_indicator so they can show orange when
+        # inactive (pins on the map / unplayed media, respectively).
+        for m in ("images", "alerts", "contacts"):
             btn = getattr(self, f"_btn_{m}", None)
             if btn:
                 btn.setStyleSheet(ACTIVE if m == mode else INACTIVE)
+        self._update_video_button_indicator()
         self._update_region_button_pin_indicators()
 
         if mode in REGION_VIEWS:
@@ -3521,6 +3698,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_slideshow()
             self._show_bottom_section()
             self.map_stack.setCurrentWidget(self.map_disabled_label)
+            self._reposition_image_nav_buttons()
             self._unlock_map_pane()
             if hasattr(self, 'contacts_widget'):
                 self.contacts_widget.hide()
@@ -3543,7 +3721,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set_hide_map(False)
             self.config.set_show_alerts(False)
             self.config.set_show_contacts(False)
-            self._play_video_poc()
+            self._media_index = 0
+            self._play_media_at_index()
         elif mode == "alerts":
             self._stop_slideshow()
             self._show_bottom_section()
@@ -3635,6 +3814,28 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 btn.setStyleSheet(INACTIVE)
 
+    def _update_video_button_indicator(self) -> None:
+        """
+        Style the Videos button from current state:
+          - active view        → green
+          - has unplayed media → orange (#F07800)
+          - otherwise          → gray
+        Mirrors _update_region_button_pin_indicators for the region buttons.
+        """
+        btn = getattr(self, '_btn_videos', None)
+        if not btn:
+            return
+        INACTIVE = "background-color: #DDDDDD; color: #000000; border: none; border-radius: 4px; padding: 2px 10px;"
+        ACTIVE   = "background-color: #28a745; color: white;   border: none; border-radius: 4px; padding: 2px 10px;"
+        HASPINS  = "background-color: #F07800; color: white;   border: none; border-radius: 4px; padding: 2px 10px;"
+
+        if getattr(self, "_current_view_mode", "") == "videos":
+            btn.setStyleSheet(ACTIVE)
+        elif self.db.has_unplayed_media():
+            btn.setStyleSheet(HASPINS)
+        else:
+            btn.setStyleSheet(INACTIVE)
+
     def _alert_font_scale(self) -> float:
         """Font scale proportional to the pane size, relative to the default
         604 x 340 pane. Measures map_stack (not alert_display) because a stack
@@ -3647,12 +3848,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _fit_alert_message(self, base_pt: float) -> None:
         """Shrink the message font until the wrapped text fits the space left
-        over after the title, date, and nav-button rows."""
+        over after the title and date, keeping clear of the floating Delete
+        button pinned to the bottom edge."""
         label = self.alert_message_label
         avail = (self.map_stack.height()
                  - self.alert_title_label.sizeHint().height()
                  - self.alert_date_label.sizeHint().height()
-                 - 30    # nav-button row
+                 - 30    # clearance for the floating Delete button
                  - 50)   # layout margins/spacing
         if avail <= 0:
             return
@@ -3677,8 +3879,8 @@ class MainWindow(QtWidgets.QMainWindow):
         scale = self._alert_font_scale()
 
         # Update navigation button states
-        self.alert_prev_btn.setEnabled(self.alert_index > 0)
-        self.alert_next_btn.setEnabled(self.alert_index < alert_count - 1)
+        self.alert_prev_btn.setEnabled(self.alert_index < alert_count - 1)
+        self.alert_next_btn.setEnabled(self.alert_index > 0)
 
         if alert:
             title, message, color, date_received, from_callsign, group = alert
@@ -3696,7 +3898,7 @@ class MainWindow(QtWidgets.QMainWindow):
             date_formatted = date_received[:16] if len(date_received) > 16 else date_received
 
             # Build date/callsign line with bold labels (use Roboto font)
-            date_line = f'<span style="font-family: Roboto;"><b>Date Received:</b> {date_formatted}'
+            date_line = f'<span style="font-family: Roboto;"><b>Date Sent:</b> {date_formatted}'
             if from_callsign:
                 date_line += f"&nbsp;&nbsp;&nbsp;<b>Sent By:</b> {from_callsign}"
             date_line += "</span>"
@@ -3751,8 +3953,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.alert_message_label.setText("")
             self.alert_date_label.setText("")
 
-        self.alert_delete_btn.setVisible(alert is not None)
+        self._alert_has_alert = alert is not None
+        self._update_alert_nav_visibility()
         self.map_stack.setCurrentWidget(self.alert_display)
+        self._reposition_alert_nav_buttons()
 
     def _alert_navigate(self, direction: int) -> None:
         """Navigate alerts by direction (-1 for newer, +1 for older)."""
@@ -4620,12 +4824,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.map_disabled_label.setText("")
 
     def _show_next_image(self) -> None:
-        """Advance to the next image in the slideshow."""
+        """Advance to the next image in the slideshow (auto-advance timer
+        callback - does not reset the interval)."""
+        self._image_navigate(1, restart_timer=False)
+
+    def _image_navigate(self, direction: int, restart_timer: bool = True) -> None:
+        """Step the slideshow by one image, alphabetically, wrapping around
+        at either end. Manual Prev/Next clicks restart the auto-advance
+        timer so a click isn't immediately followed by an auto-advance."""
         if not self.slideshow_items:
             return
-
-        self.slideshow_index = (self.slideshow_index + 1) % len(self.slideshow_items)
+        self.slideshow_index = (self.slideshow_index + direction) % len(self.slideshow_items)
         self._show_current_image()
+        if restart_timer and self.slideshow_timer.isActive():
+            self.slideshow_timer.start()
+
+    def _reposition_image_nav_buttons(self) -> None:
+        """Pin Prev (bottom-left) and Next (bottom-right) over the image
+        display's current size - matches the Alerts/video nav layout."""
+        w = self.map_disabled_label.width()
+        h = self.map_disabled_label.height()
+        margin = 8
+        self.image_prev_btn.resize(self.image_prev_btn.sizeHint())
+        self.image_next_btn.resize(self.image_next_btn.sizeHint())
+        self.image_prev_btn.move(margin, h - self.image_prev_btn.height() - margin)
+        self.image_next_btn.move(w - self.image_next_btn.width() - margin,
+                                  h - self.image_next_btn.height() - margin)
+        for btn in (self.image_prev_btn, self.image_next_btn):
+            btn.raise_()
+
+    def _update_image_nav_visibility(self) -> None:
+        """Show Prev/Next only while the mouse is over the image frame -
+        mirrors the video player's body:hover behavior."""
+        hovering = self._image_hovering
+        self.image_prev_btn.setVisible(hovering)
+        self.image_next_btn.setVisible(hovering)
 
     def _check_commsrvr_content_async(self) -> None:
         """Background thread to check commsrvr for updates."""
@@ -5535,20 +5768,79 @@ window.commstatBouncePin = function(srid) {
         if callback:
             callback()
 
-    # TEMP POC: hardcoded video id; Phase 2 will take the URL from the videos table
-    def _play_video_poc(self) -> None:
-        self._play_video("A3cMU55dIIc")
+    def _play_media_at_index(self) -> None:
+        """Play the media row at self._media_index (0 = most recent); falls
+        back to the current map region if the table is empty or the URL
+        isn't YouTube. Marks the row played and refreshes the Videos button
+        indicator."""
+        row = self.db.get_media_at_offset(getattr(self, '_media_index', 0))
+        media_id, url, title, date_received, from_callsign = row if row else (None, None, "", "", "")
+        video_id = _extract_youtube_id(url) if url else None
+        if not video_id:
+            self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
+            return
+        self._play_video(video_id, title, date_received, from_callsign)
+        self.db.mark_media_played(media_id)
+        self._update_video_button_indicator()
         # Instagram POC kept for reference — embed loads but playback fails:
         # Instagram serves H.264 only and QtWebEngine's open Chromium build
         # has no proprietary codecs (YouTube works via VP9/Opus).
         # self._play_instagram("https://www.instagram.com/reel/Da-1pOuulP4/")
 
-    def _play_video(self, video_id: str) -> None:
-        """Play a YouTube video in the map pane; the map returns on end/skip."""
+    def _on_video_prev(self) -> None:
+        """Prev button: step to the next-older media row, if any."""
+        index = getattr(self, '_media_index', 0)
+        if index + 1 < self.db.get_media_count():
+            self._media_index = index + 1
+            self._play_media_at_index()
+
+    def _on_video_next(self) -> None:
+        """Next button: step to the next-newer media row, if any."""
+        index = getattr(self, '_media_index', 0)
+        if index > 0:
+            self._media_index = index - 1
+            self._play_media_at_index()
+
+    def _on_video_delete(self) -> None:
+        """Delete button: remove the currently displayed media row, then
+        show what's now at the same offset (or step back if it was last)."""
+        index = getattr(self, '_media_index', 0)
+        self.db.delete_media_at_offset(index)
+        count = self.db.get_media_count()
+        if index >= count:
+            self._media_index = max(0, count - 1)
+        self._update_video_button_indicator()
+        self._play_media_at_index()
+
+    def _play_video(self, video_id: str, title: str = "", date_received: str = "",
+                     from_callsign: str = "") -> None:
+        """Play a YouTube video in the map pane; the map returns when it ends."""
         # Make sure the web view is the visible pane in the map stack
         if self.map_stack.currentWidget() is not self.map_widget:
             self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
-        html = _VIDEO_PLAYER_HTML.replace("__VIDEO_ID__", video_id)
+
+        def esc(s):
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        title_html = esc(title)
+        # Same "Date Sent / Sent By" format as the Alerts panel
+        # (little_gucci.py:_show_alert_display), trimmed to drop seconds.
+        date_formatted = date_received[:16] if len(date_received) > 16 else date_received
+        meta_parts = []
+        if date_formatted:
+            meta_parts.append(f"<b>Date Sent:</b> {esc(date_formatted)}")
+        if from_callsign:
+            meta_parts.append(f"<b>Sent By:</b> {esc(from_callsign)}")
+        meta_html = "&nbsp;&nbsp;&nbsp;".join(meta_parts)
+        # Same base size/scale formula as the Alerts date label (line ~3889):
+        # max(10, round(19 * scale)).
+        meta_font_px = max(10, round(19 * self._alert_font_scale()))
+
+        html = (_VIDEO_PLAYER_HTML
+                .replace("__VIDEO_ID__", video_id)
+                .replace("__VIDEO_TITLE__", title_html)
+                .replace("__VIDEO_META__", meta_html)
+                .replace("__VIDEO_META_SIZE__", str(meta_font_px)))
         self.map_widget.setHtml(html, QUrl("http://localhost/"))
 
     def _play_instagram(self, reel_url: str) -> None:
@@ -5559,8 +5851,8 @@ window.commstatBouncePin = function(srid) {
         html = _INSTAGRAM_PLAYER_HTML.replace("__IG_EMBED_URL__", embed_url)
         self.map_widget.setHtml(html, QUrl("http://localhost/"))
 
-    def _on_video_skip(self) -> None:
-        """Video ended or Skip clicked (commstat://video-ended): restore the map."""
+    def _on_video_ended(self) -> None:
+        """Video playback ended (commstat://video-ended): restore the map."""
         self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
 
     def _save_map_position(self, callback=None) -> None:
@@ -6085,6 +6377,24 @@ window.commstatBouncePin = function(srid) {
             self._newsfeed_resize_timer.start(150)
         elif obj is getattr(self, 'map_stack', None) and event.type() == QtCore.QEvent.Resize:
             self._map_pane_resize_timer.start(150)
+        elif obj is getattr(self, 'alert_display', None):
+            if event.type() == QtCore.QEvent.Resize:
+                self._reposition_alert_nav_buttons()
+            elif event.type() == QtCore.QEvent.Enter:
+                self._alert_hovering = True
+                self._update_alert_nav_visibility()
+            elif event.type() == QtCore.QEvent.Leave:
+                self._alert_hovering = False
+                self._update_alert_nav_visibility()
+        elif obj is getattr(self, 'map_disabled_label', None):
+            if event.type() == QtCore.QEvent.Resize:
+                self._reposition_image_nav_buttons()
+            elif event.type() == QtCore.QEvent.Enter:
+                self._image_hovering = True
+                self._update_image_nav_visibility()
+            elif event.type() == QtCore.QEvent.Leave:
+                self._image_hovering = False
+                self._update_image_nav_visibility()
         return super().eventFilter(obj, event)
 
     def _on_map_pane_resized(self) -> None:
