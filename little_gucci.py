@@ -2929,6 +2929,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.transmit_menu.addAction(inet_msg_action)
         self.actions["internet_message"] = inet_msg_action
 
+        share_media_action = QtWidgets.QAction("Share Media", self)
+        share_media_action.triggered.connect(self._on_share_media)
+        self.transmit_menu.addAction(share_media_action)
+        self.actions["share_media"] = share_media_action
+
         self.transmit_menu.addSeparator()
         section_lbl = QtWidgets.QAction("Grid Down Tools", self)
         section_lbl.setEnabled(False)
@@ -4713,7 +4718,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Refresh UI for data received from commsrvr server (called from main thread).
 
         Args:
-            data_types: Set of data types to refresh ('statrep', 'alert', 'message')
+            data_types: Set of data types to refresh ('statrep', 'alert', 'message', 'media')
         """
         if 'statrep' in data_types:
             self._load_statrep_data()
@@ -4727,6 +4732,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if 'statrep' not in data_types:
                 self._trigger_show_alerts()
             self._load_live_feed()
+
+        if 'media' in data_types:
+            self._update_video_button_indicator()
 
     @QtCore.pyqtSlot(int)
     def _show_program_update_notification(self, new_build: int) -> None:
@@ -6507,6 +6515,12 @@ window.commstatBouncePin = function(srid) {
         dialog = Cls(self.tcp_pool, self.connector_manager, self._trigger_show_alerts, parent=self)
         dialog.exec_()
 
+    def _on_share_media(self) -> None:
+        """Open Share Media window."""
+        Cls = self._resolve_dialog_class("media", "MediaDialog")
+        dialog = Cls(self._update_video_button_indicator, parent=self)
+        dialog.exec_()
+
     def _on_filter(self) -> None:
         """Open Display Filter window."""
         Cls = self._resolve_dialog_class("filter", "FilterDialog")
@@ -7617,6 +7631,82 @@ window.commstatBouncePin = function(srid) {
 
         return ("", None)
 
+    def _parse_media(
+        self,
+        rig_name: str,
+        message_value: str,
+        from_callsign: str,
+        utc: str,
+        global_id: int = 0
+    ) -> tuple:
+        """
+        Parse MEDIA (Share Media) message format.
+
+        Format: CALLSIGN: TARGET {TITLE}{URL}{&&}
+        e.g. "N0DDK: @AMRRON {Extended ALERT: Oil Supply Collapse}{https://www.youtube.com/watch?v=v0wBXXSZa18}{&&}"
+
+        Args:
+            rig_name: Name of the rig/source
+            message_value: Message text (includes leading "callsign: " prefix)
+            from_callsign: Sender callsign (base callsign without suffix)
+            utc: UTC timestamp string "YYYY-MM-DD HH:MM:SS"
+            global_id: Server-assigned message ID — the media table's dedup key
+                (media has no separate locally-generated id like alert_id/sr_id)
+
+        Returns:
+            (message_type, None) where message_type is "media" or ""
+        """
+        import re
+
+        match = re.search(r':\s*(\S+)\s*\{(.*?)\}\{(.*?)\}\{&&\}', message_value)
+        if not match:
+            return ("", None)
+
+        media_target = match.group(1).strip()
+        media_title = sanitize_ascii(match.group(2).strip())
+        media_url = sanitize_ascii(match.group(3).strip())
+
+        if not media_title or not media_url:
+            return ("", None)
+
+        date_only, _ = parse_message_datetime(utc)
+
+        # Filter by target — same membership rule as alerts (no dedicated
+        # "Save all Media" toggle exists, so reuse "Save all Alerts").
+        if media_target.startswith("@"):
+            if not self.config.get_save_all_alerts():
+                group_name = media_target[1:].upper()
+                all_groups = self.db.get_all_groups()
+                if group_name not in all_groups:
+                    return ("", None)
+        else:
+            user_callsigns = [c.upper() for c in self.rig_callsigns.values() if c]
+            if not user_callsigns:
+                local_callsign, _, __ = self.db.get_user_settings()
+                if local_callsign:
+                    user_callsigns = [local_callsign.upper()]
+            if media_target.upper() not in user_callsigns:
+                return ("", None)
+
+        data = {
+            'global_id': global_id,
+            'datetime': utc,
+            'date': date_only,
+            'from_callsign': from_callsign,
+            'target': media_target,
+            'title': media_title,
+            'url': media_url,
+            'played': 0,
+        }
+
+        result = self._insert_message_data(
+            rig_name, "media", data, "global_id", "media", from_callsign
+        )
+        if result:
+            return (result, None)
+
+        return ("", None)
+
     def _parse_message(
         self,
         rig_name: str,
@@ -7896,7 +7986,8 @@ window.commstatBouncePin = function(srid) {
         2. F!304 STATREP (8-digit format)
         3. F!301 STATREP (9-digit format)
         4. ALERT ({%%})
-        5. MESSAGE (contains "MSG" keyword)
+        5. MEDIA ({&&})
+        6. MESSAGE (contains "MSG" keyword)
 
         Args:
             rig_name: Name of the rig/source
@@ -7957,14 +8048,20 @@ window.commstatBouncePin = function(srid) {
                 rig_name, message_value, from_callsign, target, freq, snr, utc, source
             )
 
-        # PRIORITY 5: MESSAGE
+        # PRIORITY 5: MEDIA ({&&})
+        if "{&&}" in message_value:
+            return self._parse_media(
+                rig_name, message_value, from_callsign, utc, global_id
+            )
+
+        # PRIORITY 6: MESSAGE
         result = self._parse_message(
             rig_name, message_value, from_callsign, target, freq, snr, utc, source
         )
         if result[0]:
             return result
 
-        # PRIORITY 6: Radio-only bare group/direct message (final fallback).
+        # PRIORITY 7: Radio-only bare group/direct message (final fallback).
         # Runs only after every structured pattern above has declined.
         if source == 1:
             return self._parse_group_message(
