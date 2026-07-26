@@ -29,7 +29,7 @@ class HelpDialog(QtWidgets.QDialog):
 
         self.setStyleSheet(f"background-color: {_PANEL_BG};")
 
-        title = QtWidgets.QLabel("JOIN THE TELEGRAM COMMUNITY")
+        title = QtWidgets.QLabel("Join The Telegram Community")
         title.setStyleSheet(
             f"font-family: 'Roboto Slab'; font-size: 16px; font-weight: 900;"
             f"background-color: {_PROG_BG}; color: {_PROG_FG}; padding: 9px 0px;"
@@ -73,11 +73,11 @@ class HelpDialog(QtWidgets.QDialog):
 
 
 class AlertsMessagesHelpDialog(QtWidgets.QDialog):
-    """Explains the 'Save all Alerts' / 'Save all Messages' Config checkboxes."""
+    """Explains the 'Save all Alerts' / 'Save all Messages' / 'Save all Videos' Config checkboxes."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        apply_standard_dialog_chrome(self, "Alerts & Messages — Help", 460, 300)
+        apply_standard_dialog_chrome(self, "Alerts, Messages & Videos — Help", 460, 300)
         self._build_ui()
 
     def _build_ui(self):
@@ -87,7 +87,7 @@ class AlertsMessagesHelpDialog(QtWidgets.QDialog):
 
         self.setStyleSheet(f"background-color: {_PANEL_BG};")
 
-        title = QtWidgets.QLabel("ALERTS & MESSAGES")
+        title = QtWidgets.QLabel("Alerts, Messages & Videos")
         title.setStyleSheet(
             f"font-family: 'Roboto Slab'; font-size: 16px; font-weight: 900;"
             f"background-color: {_PROG_BG}; color: {_PROG_FG}; padding: 9px 0px;"
@@ -101,16 +101,16 @@ class AlertsMessagesHelpDialog(QtWidgets.QDialog):
         )
 
         body = QtWidgets.QLabel(
-            "By default, CommStat saves <b>alerts</b> and <b>messages</b> "
-            "addressed to your callsign, as well as those addressed to any group "
-            "listed in your <b>Groups</b> menu."
+            "By default, CommStat saves <b>alerts</b>, <b>messages</b>, and "
+            "<b>videos</b> addressed to your callsign, as well as those addressed "
+            "to any group listed in your <b>Groups</b> menu."
             "<br><br>"
-            "Checking <b>Save all Alerts</b> or <b>Save all Messages</b> tells "
-            "CommStat to <i>also</i> save alerts or messages sent to <b>any</b> "
-            "group."
+            "Checking <b>Save all Alerts</b>, <b>Save all Messages</b>, or "
+            "<b>Save all Videos</b> tells CommStat to <i>also</i> save that type "
+            "of traffic when sent to <b>any</b> group."
             "<br><br>"
-            "These options only affect group traffic. They never let you see alerts "
-            "or messages that are addressed to other callsigns."
+            "These options only affect group traffic. They never let you see alerts, "
+            "messages, or videos that are addressed to other callsigns."
         )
         body.setTextFormat(Qt.RichText)
         body.setStyleSheet(body_style)

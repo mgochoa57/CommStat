@@ -31,6 +31,7 @@ from constants import (
     RIG_FETCH_DELAY_MS, RIG_FREQ_DELAY_MS,
 )
 from id_utils import generate_time_based_id
+from little_gucci import create_verified_ssl_context
 from ui_helpers import make_button, label_font, mono_font, apply_standard_dialog_chrome, connect_single
 
 if TYPE_CHECKING:
@@ -310,7 +311,7 @@ class StatRepDialog(QDialog):
                 }).encode('utf-8')
 
                 req = urllib.request.Request(_DATAFEED, data=post_data, method='POST')
-                with urllib.request.urlopen(req, timeout=5) as response:
+                with urllib.request.urlopen(req, timeout=5, context=create_verified_ssl_context()) as response:
                     result = response.read().decode('utf-8').strip()
 
                 if result.isdigit():

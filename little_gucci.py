@@ -756,17 +756,19 @@ def _extract_youtube_id(url: str) -> Optional[str]:
 # Video player page loaded into the map QWebEngineView. Uses the YouTube
 # IFrame Player API; end-of-video navigates to commstat://video-ended (map
 # buttons are the way back to the map, so there's no on-screen exit control),
-# Prev/Next navigate to commstat://video-prev / commstat://video-next, and
-# Delete navigates to commstat://video-delete — CustomWebEnginePage routes
-# these to _on_video_ended / _on_video_prev / _on_video_next /
-# _on_video_delete. No autoplay: a transparent overlay (#tap) captures
+# Prev/Next navigate to commstat://video-prev / commstat://video-next,
+# YouTube navigates to commstat://video-youtube/{video_id} (opens the video
+# in the system browser), and Delete navigates to commstat://video-delete —
+# CustomWebEnginePage routes these to _on_video_ended / _on_video_prev /
+# _on_video_next / opening the browser / _on_video_delete. No autoplay: a
+# transparent overlay (#tap) captures
 # clicks anywhere on the video and toggles play/pause; a centered play
 # badge shows while paused. The title overlays the top of the video and a
 # "Date Sent / Sent By" meta line (same format as the Alerts panel)
 # overlays the bottom, both in white so the user can see what's loaded;
 # both disappear once playback starts (same paused/not-paused toggle as
-# the play badge). Prev/Next
-# (bottom corners) and Delete (bottom center) stay hidden until the mouse
+# the play badge). Prev/Next (bottom corners) and YouTube/Delete (bottom
+# center, side by side) stay hidden until the mouse
 # is over the pane (body:hover) so they don't clutter the video. The
 # iframe is 190px taller than the page and shifted up 95px so YouTube's
 # edge-anchored chrome (paused-state share / "More videos" / "Watch on
@@ -802,13 +804,17 @@ border-radius:4px;padding:4px 12px;font-family:sans-serif;font-size:13px;cursor:
 #prev{left:8px;}
 #next{right:8px;}
 #prev:hover,#next:hover{background:rgba(40,167,69,0.85);}
-#delete{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:10;
-opacity:0;pointer-events:none;transition:opacity .15s ease;
-background:rgba(220,53,69,0.85);color:#fff;font-family:Roboto,sans-serif;
+#bottomCenter{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:10;
+display:flex;opacity:0;pointer-events:none;transition:opacity .15s ease;}
+#youtube{background:rgba(0,0,0,0.65);color:#fff;border:1px solid #999;
+border-radius:4px;padding:4px 12px;font-family:sans-serif;font-size:13px;cursor:pointer;
+margin-right:8px;}
+#youtube:hover{background:rgba(40,167,69,0.85);}
+#delete{background:rgba(220,53,69,0.85);color:#fff;font-family:Roboto,sans-serif;
 font-size:13px;font-weight:bold;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;}
 #delete:hover{background:rgba(200,35,51,0.9);}
 #delete:active{background:rgba(189,33,48,0.95);}
-body:hover #prev,body:hover #next,body:hover #delete{opacity:1;pointer-events:auto;}
+body:hover #prev,body:hover #next,body:hover #bottomCenter{opacity:1;pointer-events:auto;}
 </style></head>
 <body>
 <div id="player"></div>
@@ -817,7 +823,10 @@ body:hover #prev,body:hover #next,body:hover #delete{opacity:1;pointer-events:au
 <div id="meta">__VIDEO_META__</div>
 <button id="prev" onclick="window.location='commstat://video-prev';">&#9664; Prev</button>
 <button id="next" onclick="window.location='commstat://video-next';">Next &#9654;</button>
+<div id="bottomCenter">
+<button id="youtube" onclick="window.location='commstat://video-youtube/__VIDEO_ID__';">YouTube</button>
 <button id="delete" onclick="window.location='commstat://video-delete';">Delete</button>
+</div>
 <script>
 var tag = document.createElement('script');
 tag.src = "https://www.youtube.com/iframe_api";
@@ -906,6 +915,13 @@ class CustomWebEnginePage(QWebEnginePage):
         if url_str == "commstat://video-next":
             if hasattr(self.parent_widget, '_on_video_next'):
                 self.parent_widget._on_video_next()
+            return False
+
+        # Handle video YouTube button: open the video in the system browser
+        if url.host() == "video-youtube":
+            video_id = url.path().lstrip("/")
+            if video_id:
+                QDesktopServices.openUrl(QUrl(f"https://www.youtube.com/watch?v={video_id}"))
             return False
 
         # Handle video Delete
@@ -1019,7 +1035,7 @@ class ConfigManager:
             self.directed_config = {
                 'hide_heartbeat': False, 'show_all_groups': True, 'show_every_group': True,
                 'hide_map': False, 'show_alerts': False, 'show_contacts': False,
-                'save_all_alerts': False, 'save_all_messages': False,
+                'save_all_alerts': False, 'save_all_messages': False, 'save_all_videos': False,
                 'selected_rss_feed': default_feed, 'apply_text_normalization': False,
                 'unchecked_groups': '',
                 'sound_alert_enabled':   True, 'sound_alert_file':   sound_defaults['alert'],
@@ -1055,6 +1071,7 @@ class ConfigManager:
                 'show_contacts': config.getboolean("DIRECTEDCONFIG", "show_contacts", fallback=False),
                 'save_all_alerts': config.getboolean("DIRECTEDCONFIG", "save_all_alerts", fallback=False),
                 'save_all_messages': config.getboolean("DIRECTEDCONFIG", "save_all_messages", fallback=False),
+                'save_all_videos': config.getboolean("DIRECTEDCONFIG", "save_all_videos", fallback=False),
                 'selected_rss_feed': config.get("DIRECTEDCONFIG", "selected_rss_feed", fallback=default_feed),
                 'apply_text_normalization': config.getboolean("DIRECTEDCONFIG", "apply_text_normalization", fallback=True),
                 'unchecked_groups': config.get("DIRECTEDCONFIG", "unchecked_groups", fallback=""),
@@ -1075,7 +1092,7 @@ class ConfigManager:
             self.directed_config = {
                 'hide_heartbeat': False, 'show_all_groups': True, 'show_every_group': True,
                 'hide_map': False, 'show_alerts': False, 'show_contacts': False,
-                'save_all_alerts': False, 'save_all_messages': False,
+                'save_all_alerts': False, 'save_all_messages': False, 'save_all_videos': False,
                 'selected_rss_feed': default_feed, 'apply_text_normalization': False,
                 'unchecked_groups': '',
                 'sound_alert_enabled':   True, 'sound_alert_file':   sound_defaults['alert'],
@@ -1215,6 +1232,12 @@ class ConfigManager:
 
     def set_save_all_messages(self, value: bool) -> None:
         self._save_setting('save_all_messages', value)
+
+    def get_save_all_videos(self) -> bool:
+        return self.directed_config.get('save_all_videos', False)
+
+    def set_save_all_videos(self, value: bool) -> None:
+        self._save_setting('save_all_videos', value)
 
     def get_sound_enabled(self, event: str) -> bool:
         return self.directed_config.get(f'sound_{event}_enabled', True)
@@ -2877,8 +2900,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.groups_menu = self.menu
         self.groups_menu.addSeparator()
 
-        # ALERTS & MESSAGES section (moved here from the Filter menu)
-        alerts_messages_label = QtWidgets.QAction("Alerts && Messages", self)
+        # ALERTS, MESSAGES & VIDEOS section (moved here from the Filter menu)
+        alerts_messages_label = QtWidgets.QAction("Alerts, Msgs && Videos", self)
         alerts_messages_label.setEnabled(False)  # Disabled as a section title
         self.menu.addAction(alerts_messages_label)
 
@@ -2893,6 +2916,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_all_messages_action.setChecked(self.config.get_save_all_messages())
         self.save_all_messages_action.triggered.connect(self._on_toggle_save_all_messages)
         self.menu.addAction(self.save_all_messages_action)
+
+        self.save_all_videos_action = QtWidgets.QAction("Save all Videos", self)
+        self.save_all_videos_action.setCheckable(True)
+        self.save_all_videos_action.setChecked(self.config.get_save_all_videos())
+        self.save_all_videos_action.triggered.connect(self._on_toggle_save_all_videos)
+        self.menu.addAction(self.save_all_videos_action)
 
         alerts_messages_help = QtWidgets.QAction("Help", self)
         alerts_messages_help.triggered.connect(self._on_alerts_messages_help)
@@ -2929,7 +2958,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.transmit_menu.addAction(inet_msg_action)
         self.actions["internet_message"] = inet_msg_action
 
-        share_media_action = QtWidgets.QAction("Share Media", self)
+        share_media_action = QtWidgets.QAction("Share YouTube Video", self)
         share_media_action.triggered.connect(self._on_share_media)
         self.transmit_menu.addAction(share_media_action)
         self.actions["share_media"] = share_media_action
@@ -3134,7 +3163,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda checked=False, u=url: QDesktopServices.openUrl(QUrl(u))
             )
 
-        self.tools_menu.addSeparator()
+        add_section_header(self.tools_menu, "Internet Websites")
         create_action(self.tools_menu, "Flock Camera Map", "flock_camera_map", self._on_flock_camera_map)
         create_action(self.tools_menu, "Live Radiation Map", "live_radiation_map", self._on_live_radiation_map)
         for label, key, url in [
@@ -3158,7 +3187,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._show_image_dialog(title=t, image_url=u, link_html=l, loading_text=lt, error_prefix=ep)
             )
 
-        self.tools_menu.addSeparator()
+        add_section_header(self.tools_menu, "CommStat Utilities")
         create_action(self.tools_menu, "Brevity", "brevity", self._on_brevity_generator)
         create_action(self.tools_menu, "Grid Finder", "grid_finder", self._on_grid_finder)
         create_action(self.tools_menu, "Large Map...", "large_map", self._on_large_map)
@@ -3198,9 +3227,6 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.clicked.connect(lambda checked, m=mode: self._set_map_view_mode(m))
             self.statusbar.addWidget(btn)
             setattr(self, f"_btn_{mode}", btn)
-
-        hint_label = QtWidgets.QLabel("  ")
-        self.statusbar.addWidget(hint_label)
 
         # Quick-link buttons after the divider, styled with the menu colors.
         menu_bg = self.config.get_color('menu_background')
@@ -3494,6 +3520,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image_next_btn.setStyleSheet(_NAV_BTN_QSS)
         self.image_next_btn.clicked.connect(lambda: self._image_navigate(1))
 
+        self.map_disabled_label.clicked.connect(self._on_image_label_clicked)
+
         self._image_hovering = False
         self.image_prev_btn.hide()
         self.image_next_btn.hide()
@@ -3642,18 +3670,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.alert_delete_btn.setVisible(hovering and self._alert_has_alert)
 
     def _setup_map_view_buttons(self) -> None:
-        """Apply initial map view state (buttons live in the status bar)."""
-        if self.config.get_show_contacts():
-            self._set_map_view_mode("contacts")
-        elif self.config.get_show_alerts():
-            self._set_map_view_mode("alerts")
-        elif self.config.get_hide_map():
-            self._set_map_view_mode("images")
-        else:
-            default = self.db.get_default_map()
-            if default not in ("us", "eu", "mideast", "seasia", "world"):
-                default = "us"
-            self._set_map_view_mode(default)
+        """Apply initial map view state (buttons live in the status bar).
+        Always starts on the map, regardless of whether Images/Alerts/
+        Contacts was showing when the app last closed."""
+        default = self.db.get_default_map()
+        if default not in ("us", "eu", "mideast", "seasia", "world"):
+            default = "us"
+        self._set_map_view_mode(default)
 
     def _set_map_view_mode(self, mode: str) -> None:
         """Switch the map panel between region maps, Images, Alerts, and Contacts views."""
@@ -4160,7 +4183,7 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"Downloading update build {new_build} from {download_url}")
 
             try:
-                with urllib.request.urlopen(download_url, timeout=30) as response:
+                with urllib.request.urlopen(download_url, timeout=30, context=create_verified_ssl_context()) as response:
                     with open(update_file, 'wb') as f:
                         f.write(response.read())
 
@@ -4830,6 +4853,14 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.map_disabled_label.setPixmap(scaled_pixmap)
         self.map_disabled_label.setText("")
+
+    def _on_image_label_clicked(self) -> None:
+        """Open the currently displayed slideshow image in the system
+        default browser (mirrors the video player's YouTube button)."""
+        if not self.slideshow_items:
+            return
+        image_path = self.slideshow_items[self.slideshow_index]
+        QDesktopServices.openUrl(QUrl.fromLocalFile(image_path))
 
     def _show_next_image(self) -> None:
         """Advance to the next image in the slideshow (auto-advance timer
@@ -5766,9 +5797,15 @@ window.commstatBouncePin = function(srid) {
 </script>"""
         map_html = map_html.replace('</body>', bounce_js + '\n</body>')
 
-        # Always set new HTML content (reload() only refreshes cached content)
+        # Always set new HTML content (reload() only refreshes cached content).
+        # Exception: while a video is playing, map_widget is showing the video
+        # player HTML, not the map — pins/data still refresh into
+        # _last_map_html so the map is current whenever the operator leaves
+        # video mode, but we don't clobber the video with setHtml() while
+        # it's on screen.
         self._last_map_html = map_html
-        self.map_widget.setHtml(self._last_map_html, QUrl("http://localhost/"))
+        if getattr(self, '_current_view_mode', '') != "videos":
+            self.map_widget.setHtml(self._last_map_html, QUrl("http://localhost/"))
         if getattr(self, '_large_map_dlg', None) and self._large_map_dlg.isVisible():
             self._large_map_dlg.update_map(self._last_map_html)
         self.map_loaded = True
@@ -6696,6 +6733,10 @@ window.commstatBouncePin = function(srid) {
         """Save all incoming group messages, not just those for groups in the local table."""
         self.config.set_save_all_messages(checked)
 
+    def _on_toggle_save_all_videos(self, checked: bool) -> None:
+        """Save all incoming YouTube video shares. Behavior TBD."""
+        self.config.set_save_all_videos(checked)
+
     def _on_alerts_messages_help(self) -> None:
         """Explain the 'Save all Alerts' / 'Save all Messages' checkboxes."""
         Cls = self._resolve_dialog_class("help", "AlertsMessagesHelpDialog")
@@ -6971,11 +7012,11 @@ window.commstatBouncePin = function(srid) {
 
     def _populate_groups_menu(self) -> None:
         """Remove any stale group label actions from the Config menu."""
-        # Indices 0-9 are the permanent Config items (settings actions, the
-        # Alerts & Messages section with its two checkboxes, and the Help item);
-        # anything beyond is a stale group label to strip.
+        # Indices 0-11 are the permanent Config items (settings actions, the
+        # Alerts, Msgs & Videos section with its three checkboxes, and the
+        # Help item); anything beyond is a stale group label to strip.
         actions = self.groups_menu.actions()
-        for action in actions[10:]:
+        for action in actions[12:]:
             self.groups_menu.removeAction(action)
 
     def _populate_filter_groups_menu(self) -> None:
@@ -7671,10 +7712,10 @@ window.commstatBouncePin = function(srid) {
 
         date_only, _ = parse_message_datetime(utc)
 
-        # Filter by target — same membership rule as alerts (no dedicated
-        # "Save all Media" toggle exists, so reuse "Save all Alerts").
+        # Filter by target — same membership rule as alerts, gated by the
+        # "Save all Videos" toggle.
         if media_target.startswith("@"):
-            if not self.config.get_save_all_alerts():
+            if not self.config.get_save_all_videos():
                 group_name = media_target[1:].upper()
                 all_groups = self.db.get_all_groups()
                 if group_name not in all_groups:
@@ -7757,13 +7798,30 @@ window.commstatBouncePin = function(srid) {
             if tcp_pattern:
                 msg_target = tcp_pattern.group(1).strip()
                 message_text = tcp_pattern.group(2).strip()
-            elif source == 2:
-                # Commsrvr fallback: accept raw message (for older formats)
-                message_text = message_value
-                msg_target = target if target else ""
             else:
-                # TCP: require MSG keyword
-                return ("", None)
+                # No-"MSG"-keyword variant seen from some AmRRON-style traffic:
+                # [CALLSIGN: ]@GROUP  ,MSG_ID,MESSAGE_TEXT,{^%} (e.g. an L27 report).
+                # Callsign prefix is optional — present when this arrives as
+                # RX.ACTIVITY (band monitoring, not subscribed to the group)
+                # but absent from RX.DIRECTED's value (sender rides in the
+                # FROM param instead, which is the common case for groups
+                # we're actually subscribed to, like @AMRRON). The trailing
+                # ",{^%}" terminator is mandatory instead, since there's no
+                # "MSG" token to anchor on — without it this would risk
+                # matching ordinary "@GROUP ,text" conversational chatter as
+                # a structured message.
+                no_msg_pattern = re.match(r'^(?:\w+:\s+)?(@\w+)\s+,([^,]+),(.+?)\s*,\{\^%\}$', message_value, re.IGNORECASE)
+                if no_msg_pattern:
+                    msg_target = no_msg_pattern.group(1).strip()
+                    msg_id = no_msg_pattern.group(2).strip()
+                    message_text = no_msg_pattern.group(3).strip()
+                elif source == 2:
+                    # Commsrvr fallback: accept raw message (for older formats)
+                    message_text = message_value
+                    msg_target = target if target else ""
+                else:
+                    # TCP: require MSG keyword
+                    return ("", None)
 
         # Skip if message is empty
         if not message_text:
@@ -7853,6 +7911,18 @@ window.commstatBouncePin = function(srid) {
         # Radio only — Internet is handled by _parse_message's source==2 fallback
         if source != 1:
             return ("", None)
+
+        # Give _parse_message first crack — it recognizes structured MESSAGE
+        # traffic (including the no-"MSG"-keyword variant), and this function
+        # is sometimes called directly (RX.ACTIVITY's bare fallback, and the
+        # non-member "Save all Messages" exception) without _parse_message
+        # having been tried yet. Only genuine bare conversational text should
+        # reach the guard/length-gate logic below.
+        structured_result = self._parse_message(
+            rig_name, message_value, from_callsign, target, freq, snr, utc, source
+        )
+        if structured_result[0]:
+            return structured_result
 
         # [CALLSIGN: ] TARGET <text>  — leading callsign prefix is optional
         m = re.match(r'^(?:\w+:\s+)?(@?\w+)\s+(.+)$', message_value, re.IGNORECASE)

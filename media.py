@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
 )
 
 from constants import DEFAULT_COLORS, COLOR_BTN_BLUE, COLOR_BTN_CYAN
+from little_gucci import create_verified_ssl_context
 from ui_helpers import make_button, label_font, apply_standard_dialog_chrome, connect_single
 
 
@@ -33,7 +34,7 @@ from ui_helpers import make_button, label_font, apply_standard_dialog_chrome, co
 # =============================================================================
 
 MAX_TITLE_LENGTH = 100
-MAX_URL_LENGTH   = 100
+MAX_URL_LENGTH   = 200
 DATABASE_FILE    = "traffic.db3"
 
 _COMMSRVR = base64.b64decode("aHR0cHM6Ly9jb21tc3RhdC5hcHA=").decode()
@@ -92,7 +93,7 @@ class _SanitizedLineEdit(QLineEdit):
 # =============================================================================
 
 class MediaDialog(QDialog):
-    """Share Media dialog — post a YouTube link via the commstat.app server."""
+    """Share YouTube Video dialog — post a YouTube link via the commstat.app server."""
 
     _commsrvr_result = QtCore.pyqtSignal(str)
 
@@ -109,7 +110,7 @@ class MediaDialog(QDialog):
 
         self._commsrvr_result.connect(self._on_commsrvr_result)
 
-        apply_standard_dialog_chrome(self, "Share Media", _WIN_W, _WIN_H)
+        apply_standard_dialog_chrome(self, "Share YouTube Video", _WIN_W, _WIN_H)
 
         self._setup_ui()
         self._load_config()
@@ -142,7 +143,7 @@ class MediaDialog(QDialog):
         body.setSpacing(10)
 
         # ── Title ─────────────────────────────────────────────────────────────
-        title_lbl = QLabel("Share Media")
+        title_lbl = QLabel("Share YouTube Video")
         title_lbl.setAlignment(QtCore.Qt.AlignCenter)
         title_lbl.setFont(QtGui.QFont("Roboto Slab", -1, QtGui.QFont.Black))
         title_lbl.setFixedHeight(36)
@@ -152,12 +153,6 @@ class MediaDialog(QDialog):
             f" padding-top:9px; padding-bottom:9px; }}"
         )
         body.addWidget(title_lbl)
-
-        # ── Notice ────────────────────────────────────────────────────────────
-        notice_lbl = QLabel("YouTube videos is the only supported media sharing available at this time.")
-        notice_lbl.setWordWrap(True)
-        notice_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        body.addWidget(notice_lbl)
 
         # ── Target ────────────────────────────────────────────────────────────
         target_lbl = QLabel("Target:")
@@ -406,7 +401,7 @@ class MediaDialog(QDialog):
                     'cs': callsign, 'data': data_string
                 }).encode('utf-8')
                 req = urllib.request.Request(_DATAFEED, data=post_data, method='POST')
-                with urllib.request.urlopen(req, timeout=5) as response:
+                with urllib.request.urlopen(req, timeout=5, context=create_verified_ssl_context()) as response:
                     result = response.read().decode('utf-8').strip()
                 if result.isdigit():
                     print(f"[Commsrvr] Media submitted successfully (global_id={result})")

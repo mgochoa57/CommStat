@@ -42,7 +42,7 @@ from constants import (
     RIG_FREQ_DELAY_MS,
 )
 # Single source of truth for mouse-wheel zoom dampening — see little_gucci.py
-from little_gucci import MAP_WHEEL_PX_PER_ZOOM
+from little_gucci import MAP_WHEEL_PX_PER_ZOOM, create_verified_ssl_context
 from ui_helpers import apply_standard_dialog_chrome, connect_single
 
 DB_PATH = "traffic.db3"
@@ -266,7 +266,7 @@ class _ReadCountThread(QThread):
         try:
             url = (f"{self.commsrvr_url}/get-read-count-808585.php"
                    f"?cs={urllib.parse.quote(self.callsign)}&id={self.global_id}")
-            with urllib.request.urlopen(url, timeout=10) as resp:
+            with urllib.request.urlopen(url, timeout=10, context=create_verified_ssl_context()) as resp:
                 text = resp.read().decode().strip()
             self.count_ready.emit(text)
         except Exception:
@@ -615,7 +615,7 @@ class _QRZInfoSection(QWidget):
                 f"{_COMMSRVR_URL}/get-last-seen-808585.php"
                 f"?cs={urllib.parse.quote(my_cs)}&lookup={urllib.parse.quote(target)}"
             )
-            with urllib.request.urlopen(url, timeout=8) as resp:
+            with urllib.request.urlopen(url, timeout=8, context=create_verified_ssl_context()) as resp:
                 result = resp.read().decode("utf-8").strip()
             if not sip.isdeleted(self):
                 self.last_seen_updated.emit(result if result else "—")
@@ -1052,7 +1052,7 @@ class QRZLookupDialog(QDialog):
         try:
             post = urllib.parse.urlencode({'cs': callsign, 'data': data_string}).encode()
             req  = urllib.request.Request(_DATAFEED_URL, data=post, method='POST')
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=5, context=create_verified_ssl_context()) as resp:
                 result = resp.read().decode().strip()
             if result.lstrip('-').isdigit():
                 print(f"[Commsrvr] Direct message submitted successfully (global_id={result})")
@@ -2184,7 +2184,7 @@ class StatRepDetailDialog(QDialog):
                 local_cs = _get_local_callsign()
                 url = (f"{self._commsrvr_url}/statrep-delete-808585.php"
                        f"?cs={urllib.parse.quote(local_cs)}&id={self._global_id}")
-                with urllib.request.urlopen(url, timeout=10):
+                with urllib.request.urlopen(url, timeout=10, context=create_verified_ssl_context()):
                     pass
             except Exception as e:
                 print(f"[StatRepDetailDialog] Delete request failed: {e}")
