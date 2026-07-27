@@ -3474,6 +3474,12 @@ class MainWindow(QtWidgets.QMainWindow):
         custom_page = CustomWebEnginePage(self)
         self.map_widget.setPage(custom_page)
 
+        # QWebEngineView paints white for an instant on setHtml() while the new
+        # document loads (its own background isn't parsed/painted yet), which
+        # reads as a white flash on every map refresh in dark mode. Matching the
+        # page's idle background to the current map theme up front removes it.
+        self._update_map_background_color()
+
         # Add to resizable map stack
         self.map_widget.setMinimumSize(320, 180)
         self.map_widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
@@ -3484,6 +3490,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Setup view-toggle buttons below map
         self._setup_map_view_buttons()
+
+    def _update_map_background_color(self) -> None:
+        """Set map_widget's idle page background to match the current map
+        theme, so the moment of white shown while a new setHtml() document
+        loads reads as the theme color instead of a white flash."""
+        dark = self.config.get_map_theme() == "dark"
+        self.map_widget.page().setBackgroundColor(QColor("#101510" if dark else "#FFFFFF"))
 
     def _setup_map_disabled_label(self) -> None:
         """Create the label/image display shown when map is hidden."""
@@ -5805,6 +5818,7 @@ window.commstatBouncePin = function(srid) {
         # it's on screen.
         self._last_map_html = map_html
         if getattr(self, '_current_view_mode', '') != "videos":
+            self._update_map_background_color()
             self.map_widget.setHtml(self._last_map_html, QUrl("http://localhost/"))
         if getattr(self, '_large_map_dlg', None) and self._large_map_dlg.isVisible():
             self._large_map_dlg.update_map(self._last_map_html)
@@ -7201,6 +7215,7 @@ window.commstatBouncePin = function(srid) {
         _v_stripped = value.rstrip() if value else ""
         if _v_stripped and any(ord(c) > 127 for c in _v_stripped[:-1]):
             print(f"{ConsoleColors.WARNING}[{rig_name}] Malformed Data — non-ASCII character in payload: {value!r}{ConsoleColors.RESET}")
+            return
 
         # Handle RX.DIRECTED messages
         if msg_type == "RX.DIRECTED":
