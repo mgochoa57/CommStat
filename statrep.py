@@ -786,7 +786,7 @@ class StatRepDialog(QDialog):
             btn_grid.setColumnStretch(col, 1)
 
         # Row 0: Forward Mode indicator (cols 0-1), Help (col 2), Grid Finder (col 3), Brevity (col 4)
-        self._forward_mode_label = QtWidgets.QLabel("Forward Mode")
+        self._forward_mode_label = QtWidgets.QLabel("Forward Mode - RF + Internet")
         self._forward_mode_label.setAlignment(QtCore.Qt.AlignCenter)
         self._forward_mode_label.setFont(label_font())
         self._forward_mode_label.setStyleSheet(

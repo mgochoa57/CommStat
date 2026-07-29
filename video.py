@@ -2,7 +2,7 @@
 # This file is part of CommStat.
 # Licensed under the GNU General Public License v3.0.
 """
-media.py - Share Media Dialog
+video.py - Share Video Dialog
 
 Allows sharing a YouTube video link via the commstat.app server (internet only).
 """
@@ -92,18 +92,18 @@ class _SanitizedLineEdit(QLineEdit):
 # Dialog
 # =============================================================================
 
-class MediaDialog(QDialog):
+class VideoDialog(QDialog):
     """Share YouTube Video dialog — post a YouTube link via the commstat.app server."""
 
     _commsrvr_result = QtCore.pyqtSignal(str)
 
     def __init__(
         self,
-        on_media_saved: callable = None,
+        on_video_saved: callable = None,
         parent=None,
     ):
         super().__init__(parent)
-        self.on_media_saved     = on_media_saved
+        self.on_video_saved     = on_video_saved
         self.callsign: str      = ""
         self.selected_group: str = ""
         self._pending_save_data = None
@@ -309,8 +309,8 @@ class MediaDialog(QDialog):
             global_id = int(result)
             self._save_to_database(global_id)
             self.close()
-            if self.on_media_saved:
-                self.on_media_saved()
+            if self.on_video_saved:
+                self.on_video_saved()
 
     # =========================================================================
     # Validation / message building
@@ -373,7 +373,7 @@ class MediaDialog(QDialog):
         d = self._pending_save_data
         with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
             conn.execute(
-                "INSERT INTO media "
+                "INSERT INTO videos "
                 "(global_id, datetime, date, from_callsign, target, title, url, played) "
                 "VALUES(?, ?, ?, ?, ?, ?, ?, 0)",
                 (global_id, d['datetime'], d['date'], d['callsign'], d['target'], d['title'], d['url'])
@@ -404,9 +404,9 @@ class MediaDialog(QDialog):
                 with urllib.request.urlopen(req, timeout=5, context=create_verified_ssl_context()) as response:
                     result = response.read().decode('utf-8').strip()
                 if result.isdigit():
-                    print(f"[Commsrvr] Media submitted successfully (global_id={result})")
+                    print(f"[Commsrvr] Video submitted successfully (global_id={result})")
                 else:
-                    print(f"[Commsrvr] Media submission failed — server returned: {result}")
+                    print(f"[Commsrvr] Video submission failed — server returned: {result}")
                 self._commsrvr_result.emit(result)
             except Exception as e:
                 reason = getattr(e, 'reason', e)
@@ -414,7 +414,7 @@ class MediaDialog(QDialog):
                     err = "ERR::Server timeout — the server did not respond in time."
                 else:
                     err = f"ERR::Connection error — {e}"
-                print(f"[Commsrvr] Media submission failed — {err[5:]}")
+                print(f"[Commsrvr] Video submission failed — {err[5:]}")
                 self._commsrvr_result.emit(err)
 
         threading.Thread(target=submit_thread, daemon=True).start()
@@ -431,8 +431,8 @@ class MediaDialog(QDialog):
         self._pending_save_data = self._capture_save_data(callsign, title, url)
         self._save_to_database(0)
         self.close()
-        if self.on_media_saved:
-            self.on_media_saved()
+        if self.on_video_saved:
+            self.on_video_saved()
 
     def _transmit(self) -> None:
         result = self._validate_input()
@@ -445,6 +445,6 @@ class MediaDialog(QDialog):
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    dlg = MediaDialog()
+    dlg = VideoDialog()
     dlg.exec_()
     sys.exit(app.exec_())

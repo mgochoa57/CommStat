@@ -2149,21 +2149,21 @@ class DatabaseManager:
             return None
         return self._execute(op, None)
 
-    def get_media_count(self) -> int:
-        """Get the total number of rows in the media table."""
+    def get_video_count(self) -> int:
+        """Get the total number of rows in the videos table."""
         def op(cursor, conn):
-            cursor.execute("SELECT COUNT(*) FROM media")
+            cursor.execute("SELECT COUNT(*) FROM videos")
             result = cursor.fetchone()
             return result[0] if result else 0
         return self._execute(op, 0)
 
-    def get_media_at_offset(self, offset: int) -> Optional[Tuple[int, str, str, str, str]]:
-        """Get (id, url, title, datetime, from_callsign) of the media row at
+    def get_video_at_offset(self, offset: int) -> Optional[Tuple[int, str, str, str, str]]:
+        """Get (id, url, title, datetime, from_callsign) of the video row at
         the given offset from most recent (0 = latest), or None."""
         def op(cursor, conn):
             cursor.execute(
                 "SELECT id, url, title, datetime, from_callsign "
-                "FROM media ORDER BY datetime DESC LIMIT 1 OFFSET ?",
+                "FROM videos ORDER BY datetime DESC LIMIT 1 OFFSET ?",
                 (offset,)
             )
             result = cursor.fetchone()
@@ -2172,31 +2172,57 @@ class DatabaseManager:
             return None
         return self._execute(op, None)
 
-    def mark_media_played(self, media_id: int) -> None:
-        """Mark a media row as played."""
+    def mark_video_played(self, video_id: int) -> None:
+        """Mark a video row as played."""
         def op(cursor, conn):
-            cursor.execute("UPDATE media SET played = 1 WHERE id = ?", (media_id,))
+            cursor.execute("UPDATE videos SET played = 1 WHERE id = ?", (video_id,))
             conn.commit()
         self._execute(op)
 
-    def delete_media_at_offset(self, offset: int) -> bool:
-        """Delete the media row at the specified offset from most recent."""
+    def delete_video_at_offset(self, offset: int) -> bool:
+        """Delete the video row at the specified offset from most recent."""
         def op(cursor, conn):
             cursor.execute(
-                "DELETE FROM media WHERE id = ("
-                "SELECT id FROM media ORDER BY datetime DESC LIMIT 1 OFFSET ?)",
+                "DELETE FROM videos WHERE id = ("
+                "SELECT id FROM videos ORDER BY datetime DESC LIMIT 1 OFFSET ?)",
                 (offset,)
             )
             conn.commit()
             return cursor.rowcount > 0
         return self._execute(op, False)
 
-    def has_unplayed_media(self) -> bool:
-        """True if any media row has played = 0."""
+    def has_unplayed_video(self) -> bool:
+        """True if any video row has played = 0."""
         def op(cursor, conn):
-            cursor.execute("SELECT 1 FROM media WHERE played = 0 LIMIT 1")
+            cursor.execute("SELECT 1 FROM videos WHERE played = 0 LIMIT 1")
             return cursor.fetchone() is not None
         return self._execute(op, False)
+
+    _RECORD_TABLES = {"alerts", "messages", "statrep", "videos"}
+
+    def get_table_stats(self, table: str) -> Tuple[int, str]:
+        """Return (row_count, oldest_datetime_or_empty) for one of the four
+        CommStat record tables (alerts, messages, statrep, videos)."""
+        if table not in self._RECORD_TABLES:
+            return (0, "")
+        def op(cursor, conn):
+            cursor.execute(f"SELECT COUNT(*), MIN(datetime) FROM {table}")
+            count, oldest = cursor.fetchone()
+            return (count or 0, oldest or "")
+        return self._execute(op, (0, ""))
+
+    def delete_rows_older_than(self, table: str, days: int) -> int:
+        """Delete rows in one of the four CommStat record tables whose
+        datetime is older than `days` days (UTC). days=0 deletes all rows.
+        Returns rows deleted."""
+        if table not in self._RECORD_TABLES or days < 0:
+            return 0
+        threshold = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        def op(cursor, conn):
+            cursor.execute(f"DELETE FROM {table} WHERE datetime < ?", (threshold,))
+            conn.commit()
+            return cursor.rowcount
+        return self._execute(op, 0)
 
 
 # =============================================================================
@@ -2885,7 +2911,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ("js8_connectors", "JS8 Connectors",  self._on_js8_connectors),
             ("qrz_enable",     "QRZ Settings",    self._on_qrz_enable),
             ("sound_settings", "Sound Settings",  self._on_sound_settings),
-            ("theme_manager",  "Theme Manager",   self._on_theme_manager),
         ]
 
         # Create actions for dropdown menu
@@ -2958,10 +2983,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.transmit_menu.addAction(inet_msg_action)
         self.actions["internet_message"] = inet_msg_action
 
-        share_media_action = QtWidgets.QAction("Share YouTube Video", self)
-        share_media_action.triggered.connect(self._on_share_media)
-        self.transmit_menu.addAction(share_media_action)
-        self.actions["share_media"] = share_media_action
+        share_video_action = QtWidgets.QAction("Share YouTube Video", self)
+        share_video_action.triggered.connect(self._on_share_video)
+        self.transmit_menu.addAction(share_video_action)
+        self.actions["share_video"] = share_video_action
 
         self.transmit_menu.addSeparator()
         section_lbl = QtWidgets.QAction("Grid Down Tools", self)
@@ -3192,6 +3217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         create_action(self.tools_menu, "Grid Finder", "grid_finder", self._on_grid_finder)
         create_action(self.tools_menu, "Large Map...", "large_map", self._on_large_map)
         create_action(self.tools_menu, "QRZ Contacts", "qrz_contacts", self._on_qrz_contacts_menu)
+        create_action(self.tools_menu, "Data Manager", "data_manager", self._on_data_manager)
 
         # Menubar items
         create_action(self.menubar, "QRZ", "qrz_lookup", self._on_qrz_lookup)
@@ -3710,7 +3736,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Non-region, non-Videos buttons are styled directly; region buttons
         # go through _update_region_button_pin_indicators and Videos through
         # _update_video_button_indicator so they can show orange when
-        # inactive (pins on the map / unplayed media, respectively).
+        # inactive (pins on the map / unplayed video, respectively).
         for m in ("images", "alerts", "contacts"):
             btn = getattr(self, f"_btn_{m}", None)
             if btn:
@@ -3762,8 +3788,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set_hide_map(False)
             self.config.set_show_alerts(False)
             self.config.set_show_contacts(False)
-            self._media_index = 0
-            self._play_media_at_index()
+            self._video_index = 0
+            self._play_video_at_index()
         elif mode == "alerts":
             self._stop_slideshow()
             self._show_bottom_section()
@@ -3859,7 +3885,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Style the Videos button from current state:
           - active view        → green
-          - has unplayed media → orange (#F07800)
+          - has unplayed video → orange (#F07800)
           - otherwise          → gray
         Mirrors _update_region_button_pin_indicators for the region buttons.
         """
@@ -3872,7 +3898,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if getattr(self, "_current_view_mode", "") == "videos":
             btn.setStyleSheet(ACTIVE)
-        elif self.db.has_unplayed_media():
+        elif self.db.has_unplayed_video():
             btn.setStyleSheet(HASPINS)
         else:
             btn.setStyleSheet(INACTIVE)
@@ -4754,7 +4780,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Refresh UI for data received from commsrvr server (called from main thread).
 
         Args:
-            data_types: Set of data types to refresh ('statrep', 'alert', 'message', 'media')
+            data_types: Set of data types to refresh ('statrep', 'alert', 'message', 'video')
         """
         if 'statrep' in data_types:
             self._load_statrep_data()
@@ -4769,7 +4795,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._trigger_show_alerts()
             self._load_live_feed()
 
-        if 'media' in data_types:
+        if 'video' in data_types:
             self._update_video_button_indicator()
 
     @QtCore.pyqtSlot(int)
@@ -5827,19 +5853,19 @@ window.commstatBouncePin = function(srid) {
         if callback:
             callback()
 
-    def _play_media_at_index(self) -> None:
-        """Play the media row at self._media_index (0 = most recent); falls
+    def _play_video_at_index(self) -> None:
+        """Play the video row at self._video_index (0 = most recent); falls
         back to the current map region if the table is empty or the URL
         isn't YouTube. Marks the row played and refreshes the Videos button
         indicator."""
-        row = self.db.get_media_at_offset(getattr(self, '_media_index', 0))
-        media_id, url, title, date_received, from_callsign = row if row else (None, None, "", "", "")
+        row = self.db.get_video_at_offset(getattr(self, '_video_index', 0))
+        video_row_id, url, title, date_received, from_callsign = row if row else (None, None, "", "", "")
         video_id = _extract_youtube_id(url) if url else None
         if not video_id:
             self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
             return
         self._play_video(video_id, title, date_received, from_callsign)
-        self.db.mark_media_played(media_id)
+        self.db.mark_video_played(video_row_id)
         self._update_video_button_indicator()
         # Instagram POC kept for reference — embed loads but playback fails:
         # Instagram serves H.264 only and QtWebEngine's open Chromium build
@@ -5847,29 +5873,29 @@ window.commstatBouncePin = function(srid) {
         # self._play_instagram("https://www.instagram.com/reel/Da-1pOuulP4/")
 
     def _on_video_prev(self) -> None:
-        """Prev button: step to the next-older media row, if any."""
-        index = getattr(self, '_media_index', 0)
-        if index + 1 < self.db.get_media_count():
-            self._media_index = index + 1
-            self._play_media_at_index()
+        """Prev button: step to the next-older video row, if any."""
+        index = getattr(self, '_video_index', 0)
+        if index + 1 < self.db.get_video_count():
+            self._video_index = index + 1
+            self._play_video_at_index()
 
     def _on_video_next(self) -> None:
-        """Next button: step to the next-newer media row, if any."""
-        index = getattr(self, '_media_index', 0)
+        """Next button: step to the next-newer video row, if any."""
+        index = getattr(self, '_video_index', 0)
         if index > 0:
-            self._media_index = index - 1
-            self._play_media_at_index()
+            self._video_index = index - 1
+            self._play_video_at_index()
 
     def _on_video_delete(self) -> None:
-        """Delete button: remove the currently displayed media row, then
+        """Delete button: remove the currently displayed video row, then
         show what's now at the same offset (or step back if it was last)."""
-        index = getattr(self, '_media_index', 0)
-        self.db.delete_media_at_offset(index)
-        count = self.db.get_media_count()
+        index = getattr(self, '_video_index', 0)
+        self.db.delete_video_at_offset(index)
+        count = self.db.get_video_count()
         if index >= count:
-            self._media_index = max(0, count - 1)
+            self._video_index = max(0, count - 1)
         self._update_video_button_indicator()
-        self._play_media_at_index()
+        self._play_video_at_index()
 
     def _play_video(self, video_id: str, title: str = "", date_received: str = "",
                      from_callsign: str = "") -> None:
@@ -6100,6 +6126,12 @@ window.commstatBouncePin = function(srid) {
             self._set_map_view_mode(getattr(self, "_last_map_region", "us"))
         else:
             self._set_map_view_mode("contacts")
+
+    def _on_data_manager(self) -> None:
+        """Open Data Manager dialog (Tools menu)."""
+        Cls = self._resolve_dialog_class("data_manager", "DataManagerDialog")
+        dlg = Cls(self.db, parent=self)
+        dlg.exec_()
 
     def _on_grid_finder(self) -> None:
         """Open Grid Finder as an in-process modeless window; reuse if already open."""
@@ -6566,9 +6598,9 @@ window.commstatBouncePin = function(srid) {
         dialog = Cls(self.tcp_pool, self.connector_manager, self._trigger_show_alerts, parent=self)
         dialog.exec_()
 
-    def _on_share_media(self) -> None:
-        """Open Share Media window."""
-        Cls = self._resolve_dialog_class("media", "MediaDialog")
+    def _on_share_video(self) -> None:
+        """Open Share Video window."""
+        Cls = self._resolve_dialog_class("video", "VideoDialog")
         dialog = Cls(self._update_video_button_indicator, parent=self)
         dialog.exec_()
 
@@ -7687,7 +7719,7 @@ window.commstatBouncePin = function(srid) {
 
         return ("", None)
 
-    def _parse_media(
+    def _parse_video(
         self,
         rig_name: str,
         message_value: str,
@@ -7696,7 +7728,7 @@ window.commstatBouncePin = function(srid) {
         global_id: int = 0
     ) -> tuple:
         """
-        Parse MEDIA (Share Media) message format.
+        Parse VIDEO (Share Video) message format.
 
         Format: CALLSIGN: TARGET {TITLE}{URL}{&&}
         e.g. "N0DDK: @AMRRON {Extended ALERT: Oil Supply Collapse}{https://www.youtube.com/watch?v=v0wBXXSZa18}{&&}"
@@ -7706,11 +7738,11 @@ window.commstatBouncePin = function(srid) {
             message_value: Message text (includes leading "callsign: " prefix)
             from_callsign: Sender callsign (base callsign without suffix)
             utc: UTC timestamp string "YYYY-MM-DD HH:MM:SS"
-            global_id: Server-assigned message ID — the media table's dedup key
-                (media has no separate locally-generated id like alert_id/sr_id)
+            global_id: Server-assigned message ID — the videos table's dedup key
+                (videos has no separate locally-generated id like alert_id/sr_id)
 
         Returns:
-            (message_type, None) where message_type is "media" or ""
+            (message_type, None) where message_type is "video" or ""
         """
         import re
 
@@ -7718,20 +7750,20 @@ window.commstatBouncePin = function(srid) {
         if not match:
             return ("", None)
 
-        media_target = match.group(1).strip()
-        media_title = sanitize_ascii(match.group(2).strip())
-        media_url = sanitize_ascii(match.group(3).strip())
+        video_target = match.group(1).strip()
+        video_title = sanitize_ascii(match.group(2).strip())
+        video_url = sanitize_ascii(match.group(3).strip())
 
-        if not media_title or not media_url:
+        if not video_title or not video_url:
             return ("", None)
 
         date_only, _ = parse_message_datetime(utc)
 
         # Filter by target — same membership rule as alerts, gated by the
         # "Save all Videos" toggle.
-        if media_target.startswith("@"):
+        if video_target.startswith("@"):
             if not self.config.get_save_all_videos():
-                group_name = media_target[1:].upper()
+                group_name = video_target[1:].upper()
                 all_groups = self.db.get_all_groups()
                 if group_name not in all_groups:
                     return ("", None)
@@ -7741,7 +7773,7 @@ window.commstatBouncePin = function(srid) {
                 local_callsign, _, __ = self.db.get_user_settings()
                 if local_callsign:
                     user_callsigns = [local_callsign.upper()]
-            if media_target.upper() not in user_callsigns:
+            if video_target.upper() not in user_callsigns:
                 return ("", None)
 
         data = {
@@ -7749,14 +7781,14 @@ window.commstatBouncePin = function(srid) {
             'datetime': utc,
             'date': date_only,
             'from_callsign': from_callsign,
-            'target': media_target,
-            'title': media_title,
-            'url': media_url,
+            'target': video_target,
+            'title': video_title,
+            'url': video_url,
             'played': 0,
         }
 
         result = self._insert_message_data(
-            rig_name, "media", data, "global_id", "media", from_callsign
+            rig_name, "videos", data, "global_id", "video", from_callsign
         )
         if result:
             return (result, None)
@@ -8071,7 +8103,7 @@ window.commstatBouncePin = function(srid) {
         2. F!304 STATREP (8-digit format)
         3. F!301 STATREP (9-digit format)
         4. ALERT ({%%})
-        5. MEDIA ({&&})
+        5. VIDEO ({&&})
         6. MESSAGE (contains "MSG" keyword)
 
         Args:
@@ -8133,9 +8165,9 @@ window.commstatBouncePin = function(srid) {
                 rig_name, message_value, from_callsign, target, freq, snr, utc, source
             )
 
-        # PRIORITY 5: MEDIA ({&&})
+        # PRIORITY 5: VIDEO ({&&})
         if "{&&}" in message_value:
-            return self._parse_media(
+            return self._parse_video(
                 rig_name, message_value, from_callsign, utc, global_id
             )
 
