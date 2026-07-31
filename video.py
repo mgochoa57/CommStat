@@ -107,6 +107,7 @@ class VideoDialog(QDialog):
         self.callsign: str      = ""
         self.selected_group: str = ""
         self._pending_save_data = None
+        self._internet_available = bool(parent and getattr(parent, '_internet_available', True))
 
         self._commsrvr_result.connect(self._on_commsrvr_result)
 
@@ -202,24 +203,44 @@ class VideoDialog(QDialog):
 
         body.addStretch()
 
+        if not self._internet_available:
+            self.group_combo.setEnabled(False)
+            self.target_call_field.setEnabled(False)
+            self.title_field.setEnabled(False)
+            self.url_field.setEnabled(False)
+
         # ── Buttons ───────────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        btn_row.addStretch()
-
-        self.save_button = make_button("Save Only", COLOR_BTN_CYAN, min_w=100)
-        self.save_button.clicked.connect(self._save_only)
-        btn_row.addWidget(self.save_button)
-
-        self.transmit_button = make_button("Transmit", COLOR_BTN_BLUE, min_w=100)
-        connect_single(self.transmit_button, self._transmit)
-        btn_row.addWidget(self.transmit_button)
-
         self.cancel_button = make_button("Cancel", _COL_CANCEL, min_w=100)
         self.cancel_button.clicked.connect(self.close)
-        btn_row.addWidget(self.cancel_button)
 
-        body.addLayout(btn_row)
+        if self._internet_available:
+            self.save_button = make_button("Save Only", COLOR_BTN_CYAN, min_w=100)
+            self.save_button.clicked.connect(self._save_only)
+
+            self.transmit_button = make_button("Transmit", COLOR_BTN_BLUE, min_w=100)
+            connect_single(self.transmit_button, self._transmit)
+
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+            btn_row.addStretch()
+            btn_row.addWidget(self.save_button)
+            btn_row.addWidget(self.transmit_button)
+            btn_row.addWidget(self.cancel_button)
+            body.addLayout(btn_row)
+        else:
+            no_inet = QLabel("No Internet Connection  ·  Video Sharing Unavailable")
+            no_inet.setAlignment(QtCore.Qt.AlignCenter)
+            no_inet.setFont(QtGui.QFont("Roboto Slab", -1, QtGui.QFont.Black))
+            no_inet.setFixedHeight(36)
+            no_inet.setStyleSheet(
+                f"QLabel {{ background-color:{_PROG_BG}; color:{_PROG_FG};"
+                " font-size:16px; padding-top:9px; padding-bottom:9px; }}"
+            )
+            no_inet_row = QHBoxLayout()
+            no_inet_row.setSpacing(8)
+            no_inet_row.addWidget(no_inet, 1)
+            no_inet_row.addWidget(self.cancel_button)
+            body.addLayout(no_inet_row)
 
     # =========================================================================
     # Config / DB

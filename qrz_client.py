@@ -243,6 +243,11 @@ class QRZClient:
         Returns:
             XML root element or None on error
         """
+        import netguard
+        if not netguard.guard("QRZ lookup"):
+            qrz_log("Skipped — Off-Grid Mode is enabled.")
+            return None
+
         try:
             url = QRZ_API_URL + "?" + urllib.parse.urlencode(params, safe="")
             with urllib.request.urlopen(url, timeout=10) as response:

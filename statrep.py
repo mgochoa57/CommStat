@@ -275,10 +275,11 @@ class StatRepDialog(QDialog):
         """Check if commsrvr submission is enabled.
 
         Returns:
-            True if enabled (always enabled, can be controlled via config.ini if needed)
+            True if enabled — i.e. Online mode (the global Off-Grid/Online
+            switch in the main header). False whenever Off-Grid Mode is on.
         """
-        # Always enabled by default. Could read from config.ini if user wants control.
-        return True
+        import netguard
+        return netguard.is_network_enabled()
 
     def _submit_to_commsrvr_async(self, frequency: int, on_complete=None) -> None:
         """Start background thread to submit statrep to commsrvr server.

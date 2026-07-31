@@ -554,6 +554,10 @@ class AlertDialog(QDialog):
 
     def _submit_to_commsrvr_async(self, frequency: int, callsign: str, alert_data: str, now: str) -> None:
         def submit_thread():
+            import netguard
+            if not netguard.guard("Alert internet submission"):
+                self._commsrvr_result.emit("ERR::Off-Grid Mode is enabled — switch back to ONLINE to send.")
+                return
             try:
                 data_string = f"{now}\t{frequency}\t0\t30\t{alert_data}"
                 post_data = urllib.parse.urlencode({

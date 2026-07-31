@@ -217,6 +217,9 @@ class _ImageLoader(QThread):
         self.max_size = max_size
 
     def run(self) -> None:
+        import netguard
+        if not netguard.guard("Image load"):
+            return
         try:
             with urllib.request.urlopen(self.url, timeout=10) as resp:
                 data = resp.read()
@@ -263,6 +266,10 @@ class _ReadCountThread(QThread):
         self.global_id = global_id
 
     def run(self) -> None:
+        import netguard
+        if not netguard.guard("Read-count check"):
+            self.count_ready.emit("")
+            return
         try:
             url = (f"{self.commsrvr_url}/get-read-count-808585.php"
                    f"?cs={urllib.parse.quote(self.callsign)}&id={self.global_id}")
@@ -605,6 +612,11 @@ class _QRZInfoSection(QWidget):
 
     def _last_seen_thread(self, target: str) -> None:
         import sip
+        import netguard
+        if not netguard.guard("Last-seen check"):
+            if not sip.isdeleted(self):
+                self.last_seen_updated.emit("—")
+            return
         try:
             my_cs = _get_local_callsign()
             if not my_cs:
@@ -891,7 +903,11 @@ class QRZLookupDialog(QDialog):
                 f"QLabel {{ background-color: {self._program_bg}; color: {self._program_fg}; "
                 "font-size: 16px; padding-top: 9px; padding-bottom: 9px; }}"
             )
-            main.addWidget(no_inet)
+            no_inet_row = QHBoxLayout()
+            no_inet_row.setSpacing(8)
+            no_inet_row.addWidget(no_inet, 1)
+            no_inet_row.addWidget(self.btn_close_lookup)
+            main.addLayout(no_inet_row)
 
     def _adjust_for_image_width(self, img_width: int) -> None:
         if img_width > 275:
@@ -1049,6 +1065,10 @@ class QRZLookupDialog(QDialog):
             print(f"[QRZLookupDialog] failed to save sent message to local table: {e}")
 
     def _submit_internet(self, callsign: str, data_string: str) -> None:
+        import netguard
+        if not netguard.guard("Internet direct message"):
+            self._send_result.emit("ERR::Off-Grid Mode is enabled — switch back to ONLINE to send.")
+            return
         try:
             post = urllib.parse.urlencode({'cs': callsign, 'data': data_string}).encode()
             req  = urllib.request.Request(_DATAFEED_URL, data=post, method='POST')
@@ -2179,7 +2199,8 @@ class StatRepDetailDialog(QDialog):
             "be deleted locally.",
         ):
             return
-        if self._global_id and self._commsrvr_url:
+        import netguard
+        if self._global_id and self._commsrvr_url and netguard.guard("Remote statrep delete"):
             try:
                 local_cs = _get_local_callsign()
                 url = (f"{self._commsrvr_url}/statrep-delete-808585.php"

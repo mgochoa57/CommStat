@@ -72,6 +72,10 @@ def _test_qrz_credentials(username: str, password: str) -> Tuple[bool, str]:
     if not username or not password:
         return False, "Username and password are required."
 
+    import netguard
+    if not netguard.guard("QRZ credential test"):
+        return False, "Off-Grid Mode is enabled — switch back to ONLINE to test QRZ credentials."
+
     params = urllib.parse.urlencode({
         "username": username,
         "password": password,

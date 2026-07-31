@@ -88,6 +88,7 @@ from connector_manager import ConnectorManager
 from js8_tcp_client import TCPConnectionPool
 from id_utils import generate_time_based_id
 from constants import *
+import netguard
 
 
 # =============================================================================
@@ -184,6 +185,12 @@ def check_internet() -> bool:
     Returns:
         True if internet is available, False otherwise.
     """
+    # Off-Grid Mode forced by the user: don't even probe. This is the single
+    # gate that everything else (RSS, map tiles, commsrvr heartbeat/auto-
+    # update, INTERNET-rig option) derives from via self._internet_available.
+    if not netguard.get_user_enabled():
+        return False
+
     # Why: this runs synchronously from __init__ before the UI paints, so a
     # slow-DNS day blocked startup for up to 9s. 1s per probe keeps the
     # worst case at 3s while still tolerating typical network latency.
@@ -191,9 +198,11 @@ def check_internet() -> bool:
         try:
             sock = socket.create_connection((host, port), timeout=1)
             sock.close()
+            netguard.set_reachable(True)
             return True
         except (socket.timeout, socket.error):
             continue
+    netguard.set_reachable(False)
     return False
 
 
@@ -923,7 +932,11 @@ class CustomWebEnginePage(QWebEnginePage):
         if url.host() == "video-youtube":
             video_id = url.path().lstrip("/")
             if video_id:
-                QDesktopServices.openUrl(QUrl(f"https://www.youtube.com/watch?v={video_id}"))
+                youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+                if hasattr(self.parent_widget, '_open_external_link'):
+                    self.parent_widget._open_external_link(youtube_url, "YouTube video")
+                else:
+                    QDesktopServices.openUrl(QUrl(youtube_url))
             return False
 
         # Handle video Delete
@@ -934,7 +947,10 @@ class CustomWebEnginePage(QWebEnginePage):
 
         # Open USGS earthquake event links in the user's browser.
         if url.scheme() in ("http", "https") and "earthquake.usgs.gov" in url.host():
-            QDesktopServices.openUrl(url)
+            if hasattr(self.parent_widget, '_open_external_link'):
+                self.parent_widget._open_external_link(url.toString(), "USGS earthquake link")
+            else:
+                QDesktopServices.openUrl(url)
             return False
 
         # Handle statrep links from map popups: /statrep/{id}/{callsign}
@@ -2796,6 +2812,126 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             print("Internet connectivity: Not available (will retry in 30 minutes)")
 
+    def _open_external_link(self, url: str, label: str = "This link") -> None:
+        """Open an external URL in the OS browser, unless Off-Grid Mode is on."""
+        if not netguard.guard(f'"{label}" link'):
+            QtWidgets.QMessageBox.information(
+                self, "Off-Grid Mode",
+                f"\"{label}\" opens an external website and is disabled while Off-Grid Mode is on.\n\n"
+                "Switch back to ONLINE in the header to use it."
+            )
+            return
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _refresh_network_toggle_ui(self) -> None:
+        """Sync the header switch's checked-state, label, and color to netguard's
+        effective state (user preference AND real reachability)."""
+        online = netguard.is_network_enabled()
+        self.network_toggle_btn.blockSignals(True)
+        self.network_toggle_btn.setChecked(online)
+        self.network_toggle_btn.blockSignals(False)
+        if online:
+            self.network_toggle_btn.setText("\U0001F310  ONLINE")
+            self.network_toggle_btn.setStyleSheet(
+                "QPushButton { background-color: #28a745; color: #FFFFFF;"
+                " border: none; border-radius: 4px; font-weight: bold; }"
+                " QPushButton:hover { background-color: #218838; }"
+            )
+            self.network_toggle_btn.setToolTip("Online Mode — click to go Off-Grid (disables all internet features)")
+        elif netguard.get_user_enabled():
+            # User hasn't forced Off-Grid — this is real connectivity loss.
+            self.network_toggle_btn.setText("\U0001F4F5  OFF-GRID")
+            self.network_toggle_btn.setStyleSheet(
+                "QPushButton { background-color: #a03030; color: #FFFFFF;"
+                " border: none; border-radius: 4px; font-weight: bold; }"
+                " QPushButton:hover { background-color: #8a2a2a; }"
+            )
+            self.network_toggle_btn.setToolTip("No internet detected — will reconnect automatically. Click to force Off-Grid Mode.")
+        else:
+            self.network_toggle_btn.setText("\U0001F4F5  OFF-GRID")
+            self.network_toggle_btn.setStyleSheet(
+                "QPushButton { background-color: #555555; color: #FFFFFF;"
+                " border: none; border-radius: 4px; font-weight: bold; }"
+                " QPushButton:hover { background-color: #444444; }"
+            )
+            self.network_toggle_btn.setToolTip("Off-Grid Mode — click to go back Online")
+
+    def _on_netguard_state_changed(self, online: bool) -> None:
+        """netguard listener: keep the header switch in sync whenever the
+        effective state changes from anywhere — a manual click (handled
+        directly by _set_network_mode too) or a real-connectivity probe
+        finding the connection came back or dropped on its own."""
+        self._refresh_network_toggle_ui()
+
+    def _on_network_toggle_clicked(self, checked: bool) -> None:
+        """Handle a click on the header Off-Grid/Online switch."""
+        self._set_network_mode(checked)
+
+    def _set_network_mode(self, online_enabled: bool) -> None:
+        """
+        Master switch: sets the user's intent in netguard, then immediately
+        applies the resulting effective mode rather than waiting for the next
+        timer tick. netguard's listener callback keeps the button's visual
+        state in sync automatically, including cases where the user asks to
+        go Online but real connectivity isn't there yet.
+        """
+        netguard.set_user_enabled(online_enabled)
+        # Always resync explicitly: Qt already flipped the checkable button's
+        # internal checked-state as part of delivering this very click, and
+        # netguard's listener only fires on an actual effective-state change
+        # (e.g. clicking Online while there's still no real internet leaves
+        # the effective state at Off-Grid, so no listener notification would
+        # otherwise fire to correct the button back).
+        self._refresh_network_toggle_ui()
+
+        if not online_enabled:
+            # Going Off-Grid: force offline immediately and stop all
+            # background network activity, even if it's mid-cycle.
+            self._internet_available = False
+            if hasattr(self, 'internet_timer'):
+                self.internet_timer.stop()
+            if hasattr(self, 'commsrvr_timer'):
+                self.commsrvr_timer.stop()
+            self.newsfeed_timer.stop() if hasattr(self, 'newsfeed_timer') else None
+            self.newsfeed_pause_timer.stop() if hasattr(self, 'newsfeed_pause_timer') else None
+            if self.config.get_selected_rss_feed() == "Disable":
+                self.newsfeed_label.setText("      +++  News Feed Disabled  +++")
+            else:
+                self.newsfeed_label.setText("      +++  Off-Grid Mode — News Feed Disabled  +++")
+            print("[Off-Grid Mode] Enabled — all network features disabled (heartbeat, RSS, map tiles, QRZ, INTERNET rig).")
+            # Deliberately not touching the map here — losing the online
+            # tile layer doesn't need a full regenerate/reload, and existing
+            # pins stay visible fine as-is.
+            return
+
+        # Coming back Online: re-probe real connectivity and restart
+        # everything that depends on it.
+        self._internet_available = check_internet()
+        if hasattr(self, 'internet_timer'):
+            self.internet_timer.stop()
+        if self._internet_available:
+            print("Internet connectivity: Available")
+            feed_name = self.config.get_selected_rss_feed()
+            if feed_name == "Disable":
+                self.newsfeed_label.setText("      +++  News Feed Disabled  +++")
+            else:
+                self._start_rss_fetch()
+
+            def start_commsrvr_heartbeat():
+                self._check_commsrvr()
+                self.commsrvr_timer.start(HEARTBEAT_INTERVAL_MS)
+            QTimer.singleShot(HEARTBEAT_DELAY_MS, start_commsrvr_heartbeat)
+
+            # Give the WebEngine a moment before touching it again after
+            # being idle through the off-grid period, rather than hitting
+            # it immediately in this same click-handler call stack.
+            QTimer.singleShot(1500, lambda: self._save_map_position(callback=self._load_map))
+        else:
+            print("Internet connectivity: Not available (will retry in 30 minutes)")
+            self.newsfeed_label.setText("  No internet connection")
+            if hasattr(self, 'internet_timer'):
+                self.internet_timer.start(INTERNET_CHECK_INTERVAL)
+
     def _log_startup(self, line: str) -> None:
         """Log a startup status line to console (no timestamp) and live feed (timestamped)."""
         print(line)
@@ -3228,7 +3364,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, url in WEATHER_MAP_LINKS:
             create_action(
                 self.tools_menu, label, "weather_" + label.lower().replace(" ", "_").replace(".", "_"),
-                lambda checked=False, u=url: QDesktopServices.openUrl(QUrl(u))
+                lambda checked=False, u=url, lbl=label: self._open_external_link(u, lbl)
             )
 
         add_section_header(self.tools_menu, "Internet Websites")
@@ -3243,7 +3379,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]:
             create_action(
                 self.tools_menu, label, key,
-                lambda checked=False, u=url: QDesktopServices.openUrl(QUrl(u))
+                lambda checked=False, u=url, lbl=label: self._open_external_link(u, lbl)
             )
 
         # HAMSQL Tools section - solar/radio image dialogs
@@ -3311,7 +3447,7 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setFixedWidth(70)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(f"background-color: {menu_bg}; color: {menu_fg}; border: none; border-radius: 4px; padding: 2px 10px;")
-            btn.clicked.connect(lambda checked, u=url: QDesktopServices.openUrl(QUrl(u)))
+            btn.clicked.connect(lambda checked, u=url, lbl=label: self._open_external_link(u, lbl))
             self.statusbar.addWidget(btn)
 
         # Add "Rig Status:" label (no sunken effect, permanent on right)
@@ -3432,6 +3568,20 @@ class MainWindow(QtWidgets.QMainWindow):
         """)
         self.last20_button.clicked.connect(self._on_last20_clicked)
         self.header_layout.addWidget(self.last20_button)
+
+        self.header_layout.addSpacing(22)
+
+        # Off-Grid / Online master switch — gates every network call in the
+        # app (heartbeat/auto-update, RSS, map tiles, QRZ, INTERNET rig).
+        self.network_toggle_btn = QtWidgets.QPushButton(self.header_widget)
+        self.network_toggle_btn.setCheckable(True)
+        self.network_toggle_btn.setFixedSize(118, 28)
+        self.network_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.network_toggle_btn.setFont(_btn_font)
+        self.network_toggle_btn.clicked.connect(self._on_network_toggle_clicked)
+        self.header_layout.addWidget(self.network_toggle_btn)
+        netguard.add_listener(self._on_netguard_state_changed)
+        self._refresh_network_toggle_ui()
 
         self.header_layout.addSpacing(22)
 
@@ -5315,7 +5465,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif col == 10:
             url = item.data(Qt.UserRole)
             if url:
-                QDesktopServices.openUrl(QUrl(url))
+                self._open_external_link(url, "Contact link")
         elif col == 12:
             cs_item = self.contacts_table.item(item.row(), 0)
             callsign = cs_item.text().strip() if cs_item else ""
@@ -6255,19 +6405,19 @@ window.commstatBouncePin = function(srid) {
 
     def _on_whats_new(self) -> None:
         """Open the What's New page in the user's browser."""
-        QDesktopServices.openUrl(QUrl("https://commstat.app/new-features.php"))
+        self._open_external_link("https://commstat.app/new-features.php", "What's New")
 
     def _on_live_better(self) -> None:
         """Open the Live Better page in the user's browser."""
-        QDesktopServices.openUrl(QUrl("https://commstat.app/how-are-you-feeling.php"))
+        self._open_external_link("https://commstat.app/how-are-you-feeling.php", "Live Better")
 
     def _on_flock_camera_map(self) -> None:
         """Open the Flock Camera Map (deflock.org) in the user's browser."""
-        QDesktopServices.openUrl(QUrl("https://maps.deflock.org/?lat=39.8283&lng=-98.5795&zoom=4.00"))
+        self._open_external_link("https://maps.deflock.org/?lat=39.8283&lng=-98.5795&zoom=4.00", "Flock Camera Map")
 
     def _on_live_radiation_map(self) -> None:
         """Open the Live Radiation Map (gmcmap.com) in the user's browser."""
-        QDesktopServices.openUrl(QUrl("https://gmcmap.com/"))
+        self._open_external_link("https://gmcmap.com/", "Live Radiation Map")
 
     def _on_qrz_lookup(self) -> None:
         """Open standalone QRZ Lookup dialog (Tools menu)."""
@@ -8399,6 +8549,14 @@ window.commstatBouncePin = function(srid) {
             loading_text: Text to show while loading.
             error_prefix: Prefix for error message (e.g., "Failed to load band conditions").
         """
+        if not netguard.guard(f'"{title}"'):
+            QtWidgets.QMessageBox.information(
+                self, "Off-Grid Mode",
+                f"\"{title}\" needs an internet connection and is disabled while Off-Grid Mode is on.\n\n"
+                "Switch back to ONLINE in the header to use it."
+            )
+            return
+
         panel_bg = DEFAULT_COLORS.get("module_background", "#DDDDDD")
         panel_fg = DEFAULT_COLORS.get("module_foreground", "#000000")
 

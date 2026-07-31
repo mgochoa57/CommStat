@@ -484,6 +484,10 @@ class GroupMessageDialog(QDialog):
 
     def _submit_to_commsrvr_async(self, frequency: int, callsign: str, message_data: str, now: str) -> None:
         def submit_thread():
+            import netguard
+            if not netguard.guard("Message internet submission"):
+                self._commsrvr_result.emit("ERR::Off-Grid Mode is enabled — switch back to ONLINE to send.")
+                return
             try:
                 data_string = f"{now}\t{frequency}\t0\t30\t{message_data}"
                 post_data = urllib.parse.urlencode({'cs': callsign, 'data': data_string}).encode('utf-8')
