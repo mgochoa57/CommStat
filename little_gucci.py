@@ -895,6 +895,8 @@ class CustomWebEnginePage(QWebEnginePage):
     def javaScriptConsoleMessage(self, level, message, line, source):
         if 'webkitStorageInfo' in message:
             return
+        if 'SameSite' in message:
+            return
         super().javaScriptConsoleMessage(level, message, line, source)
 
     def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
@@ -1035,6 +1037,7 @@ class ConfigManager:
             self.directed_config = {
                 'hide_heartbeat': False, 'show_all_groups': True, 'show_every_group': True,
                 'hide_map': False, 'show_alerts': False, 'show_contacts': False,
+                'hide_internet_feed': False,
                 'save_all_alerts': False, 'save_all_messages': False, 'save_all_videos': False,
                 'selected_rss_feed': default_feed, 'apply_text_normalization': False,
                 'unchecked_groups': '',
@@ -1069,6 +1072,7 @@ class ConfigManager:
                 'hide_map': config.getboolean("DIRECTEDCONFIG", "hide_map", fallback=False),
                 'show_alerts': config.getboolean("DIRECTEDCONFIG", "show_alerts", fallback=False),
                 'show_contacts': config.getboolean("DIRECTEDCONFIG", "show_contacts", fallback=False),
+                'hide_internet_feed': config.getboolean("DIRECTEDCONFIG", "hide_internet_feed", fallback=False),
                 'save_all_alerts': config.getboolean("DIRECTEDCONFIG", "save_all_alerts", fallback=False),
                 'save_all_messages': config.getboolean("DIRECTEDCONFIG", "save_all_messages", fallback=False),
                 'save_all_videos': config.getboolean("DIRECTEDCONFIG", "save_all_videos", fallback=False),
@@ -1082,6 +1086,8 @@ class ConfigManager:
                 'sound_statrep_enabled': config.getboolean("DIRECTEDCONFIG", "sound_statrep_enabled", fallback=seed),
                 'sound_statrep_file':    config.get("DIRECTEDCONFIG", "sound_statrep_file",    fallback=sound_defaults['statrep']),
                 'weather_radar':          config.getboolean("DIRECTEDCONFIG", "weather_radar",          fallback=False),
+                'weather_radar_refresh':  config.getint("DIRECTEDCONFIG", "weather_radar_refresh",  fallback=5),
+                'show_radar_timestamp':   config.getboolean("DIRECTEDCONFIG", "show_radar_timestamp",   fallback=True),
                 'earthquake_layer':       config.getboolean("DIRECTEDCONFIG", "earthquake_layer",       fallback=False),
                 'earthquake_min_mag':     config.getfloat("DIRECTEDCONFIG", "earthquake_min_mag",     fallback=2.5),
                 'earthquake_region':      config.get("DIRECTEDCONFIG", "earthquake_region",      fallback="Worldwide"),
@@ -1092,6 +1098,7 @@ class ConfigManager:
             self.directed_config = {
                 'hide_heartbeat': False, 'show_all_groups': True, 'show_every_group': True,
                 'hide_map': False, 'show_alerts': False, 'show_contacts': False,
+                'hide_internet_feed': False,
                 'save_all_alerts': False, 'save_all_messages': False, 'save_all_videos': False,
                 'selected_rss_feed': default_feed, 'apply_text_normalization': False,
                 'unchecked_groups': '',
@@ -1195,6 +1202,12 @@ class ConfigManager:
 
     def set_hide_heartbeat(self, value: bool) -> None:
         self._save_setting('hide_heartbeat', value)
+
+    def get_hide_internet_feed(self) -> bool:
+        return self.directed_config.get('hide_internet_feed', False)
+
+    def set_hide_internet_feed(self, value: bool) -> None:
+        self._save_setting('hide_internet_feed', value)
 
     def get_hide_map(self) -> bool:
         return self.directed_config.get('hide_map', False)
@@ -2525,7 +2538,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.feed_messages: List[str] = []
         self.max_feed_messages = 500  # Limit buffer size
         self._hide_live_feed: bool = False          # Session-only; resets on restart
-        self._hide_internet_statrep: bool = False   # Session-only; resets on restart
+        self._hide_internet_statrep: bool = self.config.get_hide_internet_feed()
         self._hide_green_pins: bool = False         # Session-only; resets on restart
 
         # Run startup status checks and initiate TCP connections.
@@ -2542,6 +2555,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_ui()
         self._sync_weather_radar_action()
         self._setup_radar_refresh_timer()
+        QTimer.singleShot(0, self._apply_restored_view)
 
     def _setup_window(self) -> None:
         """Configure window properties (size, title, icon)."""
@@ -2571,6 +2585,17 @@ class MainWindow(QtWidgets.QMainWindow):
         config.read(CONFIG_FILE)
         if not config.has_section("WINDOW"):
             return
+
+        # Stashed for _apply_restored_view(), which runs once the map/message/
+        # contacts/video widgets that _set_map_view_mode() depends on actually
+        # exist - none of them are built yet at this point in __init__.
+        self._pending_last_view = config.get("WINDOW", "last_view", fallback="") or None
+        try:
+            self._pending_pane_height = config.getint("WINDOW", "map_pane_height", fallback=None)
+            self._pending_pane_width = config.getint("WINDOW", "map_pane_width", fallback=None)
+        except (ValueError, TypeError):
+            self._pending_pane_height = None
+            self._pending_pane_width = None
 
         try:
             x = config.getint("WINDOW", "x", fallback=None)
@@ -2657,6 +2682,24 @@ class MainWindow(QtWidgets.QMainWindow):
         config.set("WINDOW", "y", str(pos.y()))
         config.set("WINDOW", "width", str(size.width()))
         config.set("WINDOW", "height", str(size.height()))
+
+        # Save which view was showing (map region / images / videos / alerts /
+        # contacts) and the map pane's size, so relaunch can restore both.
+        last_view = getattr(self, "_current_view_mode", "") or "us"
+        config.set("WINDOW", "last_view", last_view)
+
+        if hasattr(self, "bottom_splitter") and not self.bottom_splitter.isHidden():
+            pane_height = self.bottom_splitter.height()
+            pane_width = self.bottom_splitter.sizes()[0] if self.bottom_splitter.sizes() else 0
+        else:
+            # Contacts view hides bottom_splitter entirely; fall back to the
+            # last known size (see _set_map_view_mode's "contacts" branch).
+            pane_height = getattr(self, "_saved_map_pane_height", 0)
+            pane_width = getattr(self, "_saved_map_pane_width", 0)
+        if pane_height:
+            config.set("WINDOW", "map_pane_height", str(pane_height))
+        if pane_width:
+            config.set("WINDOW", "map_pane_width", str(pane_width))
 
         try:
             with open(CONFIG_FILE, 'w') as f:
@@ -3050,7 +3093,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.hide_internet_statrep_action = QtWidgets.QAction("Hide Internet Feed", self)
         self.hide_internet_statrep_action.setCheckable(True)
-        self.hide_internet_statrep_action.setChecked(False)
+        self.hide_internet_statrep_action.setChecked(self.config.get_hide_internet_feed())
         self.hide_internet_statrep_action.triggered.connect(self._on_toggle_hide_internet_statrep)
         self.filter_menu.addAction(self.hide_internet_statrep_action)
 
@@ -3709,13 +3752,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.alert_delete_btn.setVisible(hovering and self._alert_has_alert)
 
     def _setup_map_view_buttons(self) -> None:
-        """Apply initial map view state (buttons live in the status bar).
-        Always starts on the map, regardless of whether Images/Alerts/
-        Contacts was showing when the app last closed."""
+        """Apply the default map region as a baseline (buttons live in the
+        status bar). Widgets built later in _setup_ui() (message_table,
+        contacts_widget, video data) aren't ready yet, so this always starts
+        on the map; _apply_restored_view() switches to the last-visible view
+        once construction finishes, if one was saved."""
         default = self.db.get_default_map()
         if default not in ("us", "eu", "mideast", "seasia", "world"):
             default = "us"
         self._set_map_view_mode(default)
+
+    def _apply_restored_view(self) -> None:
+        """Switch to the view (map region / images / videos / alerts /
+        contacts) and map pane size that were active when the app last
+        closed, as read into self._pending_* by _restore_window_position().
+        Runs once via QTimer.singleShot(0, ...) after __init__ completes, so
+        every widget _set_map_view_mode() touches actually exists."""
+        valid_modes = ("us", "eu", "mideast", "seasia", "world",
+                       "images", "videos", "alerts", "contacts")
+        pending_view = getattr(self, "_pending_last_view", None)
+        pending_height = getattr(self, "_pending_pane_height", None)
+        pending_width = getattr(self, "_pending_pane_width", None)
+
+        if pending_height:
+            self._saved_map_pane_height = pending_height
+        if pending_width:
+            self._saved_map_pane_width = pending_width
+
+        if pending_view in valid_modes and pending_view != self._current_view_mode:
+            self._set_map_view_mode(pending_view)
+
+        if pending_height and hasattr(self, "bottom_splitter") and not self.bottom_splitter.isHidden():
+            total = self.content_splitter.height()
+            feed_h = self.feed_text.height() if hasattr(self, "feed_text") else 100
+            handle_px = self.content_splitter.handleWidth() * 2
+            statrep_h = max(100, total - feed_h - pending_height - handle_px)
+            self.content_splitter.setSizes([statrep_h, feed_h, pending_height])
+            if pending_width:
+                remaining = max(100, self.bottom_splitter.width() - pending_width)
+                self.bottom_splitter.setSizes([pending_width, remaining])
 
     def _set_map_view_mode(self, mode: str) -> None:
         """Switch the map panel between region maps, Images, Alerts, and Contacts views."""
@@ -3784,7 +3859,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.contacts_widget.hide()
             if hasattr(self, 'message_table'):
                 self.message_table.show()
-            # Transient mode: not persisted, so a relaunch never starts in video
             self.config.set_hide_map(False)
             self.config.set_show_alerts(False)
             self.config.set_show_contacts(False)
@@ -3805,9 +3879,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_alert_display()
         elif mode == "contacts":
             self._stop_slideshow()
-            # Remember the pane height so it can be restored when leaving Contacts
+            # Remember the pane height/width so they can be restored when leaving Contacts
             if not self.bottom_splitter.isHidden():
                 self._saved_map_pane_height = self.bottom_splitter.height()
+                sizes = self.bottom_splitter.sizes()
+                if sizes:
+                    self._saved_map_pane_width = sizes[0]
             self.bottom_splitter.hide()
             self.config.set_hide_map(True)
             self.config.set_show_alerts(False)
@@ -5732,9 +5809,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pulse_css = """
 <style>
 @keyframes commstatMarkerSlowPulse {
-  0%   { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .40; }
-  50%  { filter: drop-shadow(0 0 14px currentColor); opacity: 1.00; }
-  100% { filter: drop-shadow(0 0 0 rgba(255,255,255,.00)); opacity: .40; }
+  0%   { opacity: .40; }
+  50%  { opacity: 1.00; }
+  100% { opacity: .40; }
 }
 /* Leaflet renders CircleMarker objects as SVG paths with this class. */
 .leaflet-overlay-pane svg path.leaflet-interactive {
@@ -6644,8 +6721,9 @@ window.commstatBouncePin = function(srid) {
         self._load_live_feed()
 
     def _on_toggle_hide_internet_statrep(self, checked: bool) -> None:
-        """Show only RF-sourced (source=1) statreps in table and map. Session-only — resets on restart."""
+        """Show only RF-sourced (source=1) statreps in table and map."""
         self._hide_internet_statrep = checked
+        self.config.set_hide_internet_feed(checked)
         self._load_statrep_data()
         self._save_map_position(callback=self._load_map)
 
@@ -6794,10 +6872,8 @@ window.commstatBouncePin = function(srid) {
         self._hide_live_feed = checked
         if checked:
             self.feed_text.hide()
-            self.main_layout.setRowStretch(3, 0)
         else:
             self.feed_text.show()
-            self.main_layout.setRowStretch(3, 1)
 
     def _on_large_map(self) -> None:
         """Open or raise the large map breakout window."""
