@@ -4398,7 +4398,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
     def _handle_program_update(self, content: str) -> bool:
-        return False  # Program updates disabled by local build
         """Handle program update from commsrvr server.
 
         Expected format:
