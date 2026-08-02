@@ -182,6 +182,7 @@ class StatRepDialog(QDialog):
         # Configuration
         self.callsign = ""
         self.grid = ""
+        self._grid_user_edited = False  # blocks late JS8Call grid_received from clobbering a manual edit
         self.selected_group = ""
         self.statrep_id = ""
         self._pending_frequency = 0  # For storing frequency during transmit
@@ -371,6 +372,8 @@ class StatRepDialog(QDialog):
 
     def _on_rig_changed(self, rig_name: str) -> None:
         """Handle rig selection change - fetch callsign and grid from JS8Call."""
+        # Re-arm auto-population for the newly selected rig's fetch.
+        self._grid_user_edited = False
         if not rig_name or "(disconnected)" in rig_name:
             if not getattr(self, '_forward_origin', None):
                 self.callsign = ""
@@ -378,7 +381,9 @@ class StatRepDialog(QDialog):
                 if hasattr(self, 'from_field'):
                     self.from_field.setText("")
             if hasattr(self, 'grid_field'):
+                self._grid_auto_populating = True
                 self.grid_field.setText("")
+                self._grid_auto_populating = False
             if hasattr(self, 'freq_field'):
                 self.freq_field.setText("")
             return
@@ -406,7 +411,9 @@ class StatRepDialog(QDialog):
                 if hasattr(self, 'from_field'):
                     self.from_field.setText(callsign)
                 if hasattr(self, 'grid_field'):
+                    self._grid_auto_populating = True
                     self.grid_field.setText(grid)
+                    self._grid_auto_populating = False
             if hasattr(self, 'freq_field'):
                 self.freq_field.setText("")
             if hasattr(self, 'mode_combo'):
@@ -536,9 +543,17 @@ class StatRepDialog(QDialog):
         print(f"[StatRep] Grid received from {rig_name}: {grid}")
         # Only update if this is the currently selected rig and not forwarding
         if self.rig_combo.currentText() == rig_name and not getattr(self, '_forward_origin', None):
+            # Don't clobber a grid the user already typed — this response can
+            # arrive well after the request was sent (rig/JS8Call round trip),
+            # potentially after the user has edited the field and tabbed away.
+            if self._grid_user_edited:
+                print(f"[StatRep] Ignoring grid from {rig_name} — user already edited the field")
+                return
             self.grid = grid
             if hasattr(self, 'grid_field'):
+                self._grid_auto_populating = True
                 self.grid_field.setText(grid)
+                self._grid_auto_populating = False
             # Only auto-populate remarks if the user hasn't typed anything yet
             if hasattr(self, 'remarks_field') and not self._get_remarks_text():
                 self._set_remarks_text(self._get_default_remarks())
@@ -558,6 +573,8 @@ class StatRepDialog(QDialog):
 
     def _on_grid_field_changed(self, text: str) -> None:
         """Handle user editing the Grid field."""
+        if not getattr(self, '_grid_auto_populating', False):
+            self._grid_user_edited = True
         raw = text.strip()
         formatted = raw.upper()
         self.grid = formatted
@@ -1077,7 +1094,9 @@ class StatRepDialog(QDialog):
             self._suppress_auto_map_pin = False
 
         if data.get("grid"):
+            self._grid_auto_populating = True
             self.grid_field.setText(data["grid"])
+            self._grid_auto_populating = False
 
         scope_text = (data.get("scope") or "").strip()
         if scope_text and hasattr(self, 'scope_combo'):
