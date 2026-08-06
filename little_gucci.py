@@ -2611,7 +2611,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hide_green_pins: bool = False         # Session-only; resets on restart
         self._map_filter_state: str = "off"         # Session-only; resets on restart. One of: off, map, custom
         self._map_bounds: Optional[Tuple[float, float, float, float]] = None  # (south, west, north, east); only set while _map_filter_state == "map"
-        self._custom_filter_mode: str = "and"       # Session-only; joins the Custom Filtering boxes. One of: and, or
+        self._custom_filter_mode: str = "or"         # Session-only; joins the Custom Filtering boxes. One of: and, or
 
         # Run startup status checks and initiate TCP connections.
         # Order: User Settings -> Groups -> JS8 Connectors -> QRZ Settings.
@@ -3056,14 +3056,51 @@ class MainWindow(QtWidgets.QMainWindow):
         load-bearing: they force Qt's stylesheet engine to draw menu items
         itself on every platform instead of delegating to the native style
         (QMacStyle reserves a menu-wide check column and draws its own large
-        checkmark, which broke layout on macOS). With these rules, layout is
-        per-item everywhere: non-checkable items stay flush left, checkable
-        items get the square indicator (round for exclusive/radio groups).
+        checkmark, which broke layout on macOS).
+
+        Item indentation differs by platform because it has to: on macOS,
+        QMenu::indicator ignores padding/margin entirely for its own
+        position (only border-left shifts it), and — confirmed empirically,
+        not documented — a QMenu that contains at least one checkable action
+        silently adds ~14px of extra left inset to every item's text in that
+        menu (checkable or not), on top of whatever padding is set here.
+        That's what "padding-left: 0" below is leaning on: it lets the
+        automatic inset alone align plain-text rows with the checkbox's own
+        left edge in menus that mix checkable and non-checkable items (see
+        _fix_plain_menu_indent for menus with no checkable items at all,
+        which get none of that automatic inset and need an explicit one).
+
+        Windows was already confirmed to look correct with the plain,
+        original rule (no indicator quirks reported there), so it keeps
+        that simpler behavior untouched rather than inheriting Mac-specific
+        tuning that hasn't been verified on that platform.
         """
         menu_bg = self.config.get_color('menu_background')
         menu_fg = self.config.get_color('menu_foreground')
         panel_bg = self.config.get_color('module_background')
         panel_fg = self.config.get_color('module_foreground')
+        if sys.platform == "win32":
+            item_rule = """
+            QMenu::item {
+                font-family: Roboto;
+                font-size: 13px;
+                padding: 3px 12px;
+                background-color: transparent;
+            }
+            """
+        else:
+            item_rule = """
+            QMenu::item {
+                font-family: Roboto;
+                font-size: 13px;
+                padding: 3px 12px 3px 0px;
+                background-color: transparent;
+            }
+            QMenu::item:unchecked, QMenu::item:checked {
+                padding-left: 10px;
+                border-left: 14px solid transparent;
+            }
+            """
         return f"""
             QMenuBar {{
                 background-color: {menu_bg};
@@ -3084,12 +3121,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 font-family: Roboto;
                 font-size: 13px;
             }}
-            QMenu::item {{
-                font-family: Roboto;
-                font-size: 13px;
-                padding: 3px 12px;
-                background-color: transparent;
-            }}
+            {item_rule}
             QMenu::item:selected {{
                 background-color: {menu_bg};
                 color: {menu_fg};
@@ -3119,6 +3151,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-radius: 6px;
             }}
         """
+
+    def _fix_plain_menu_indent(self, menu: QtWidgets.QMenu) -> None:
+        """Give a checkbox-free menu the same left inset that mixed menus
+        get for free from macOS/Linux's automatic checkbox-gutter reservation
+        (see _menubar_qss) — without this, menus like Transmit/Tools render
+        flush against the left edge since Qt never reserves that gutter
+        unless the menu has at least one checkable action. No-op on Windows,
+        which never relied on that automatic reservation to begin with.
+        """
+        if sys.platform == "win32":
+            return
+        if any(a.isCheckable() for a in menu.actions()):
+            return
+        menu.setStyleSheet("QMenu::item { padding: 3px 12px 3px 14px; }")
 
     def _setup_menu(self) -> None:
         """Create the menu bar with all actions."""
@@ -3237,6 +3283,8 @@ class MainWindow(QtWidgets.QMainWindow):
             action.triggered.connect(handler)
             self.transmit_menu.addAction(action)
             self.actions[name] = action
+
+        self._fix_plain_menu_indent(self.transmit_menu)
 
         # Create the Filter menu
         self.filter_menu = _PersistentCheckMenu("Filter", self.menubar)
@@ -3453,6 +3501,8 @@ class MainWindow(QtWidgets.QMainWindow):
         create_action(self.tools_menu, "Large Map...", "large_map", self._on_large_map)
         create_action(self.tools_menu, "QRZ Contacts", "qrz_contacts", self._on_qrz_contacts_menu)
         create_action(self.tools_menu, "Data Manager", "data_manager", self._on_data_manager)
+
+        self._fix_plain_menu_indent(self.tools_menu)
 
         # Menubar items
         create_action(self.menubar, "QRZ", "qrz_lookup", self._on_qrz_lookup)
