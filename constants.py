@@ -57,6 +57,8 @@ COLOR_BTN_GREEN = "#28a745"
 COLOR_BTN_BLUE  = "#007bff"
 COLOR_BTN_CYAN  = "#17a2b8"
 COLOR_BTN_GRAY  = "#6c757d"
+COLOR_BTN_HELP  = "#e83e8c"  # Help buttons app-wide
+COLOR_BTN_CLOSE = "#555555"  # Close/dismiss buttons app-wide
 
 # =============================================================================
 # Default Color Scheme (used by ConfigManager / config.ini)

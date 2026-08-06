@@ -54,6 +54,7 @@ sudo cp "$(dirname "$0")/radiation-32.png" /usr/share/pixmaps/radiation-32.png
 echo ""
 echo "Creating desktop shortcut..."
 INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+chmod +x "$INSTALL_DIR/linuxlauncher.sh"
 mkdir -p "$HOME/Desktop"
 cat > "$HOME/Desktop/CommStat.desktop" << EOF
 [Desktop Entry]

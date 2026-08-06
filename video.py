@@ -8,6 +8,7 @@ Allows sharing a YouTube video link via the commstat.app server (internet only).
 """
 
 import base64
+import json
 import re
 import sqlite3
 import sys
@@ -34,6 +35,7 @@ from ui_helpers import make_button, label_font, apply_standard_dialog_chrome, co
 # =============================================================================
 
 MAX_TITLE_LENGTH = 100
+_TITLE_PLACEHOLDER = "Fills in from the URL — or type your own"
 MAX_URL_LENGTH   = 200
 DATABASE_FILE    = "traffic.db3"
 
@@ -62,6 +64,48 @@ def _extract_youtube_id(url: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+_NON_PRINTABLE_RE = re.compile(r"[^ -~]+")
+
+
+# YouTube's public oEmbed endpoint returns a video's title as JSON with no API
+# key and no quota. 404s on a deleted/private/nonexistent id.
+_OEMBED_URL = "https://www.youtube.com/oembed"
+
+
+def _clean_fetched_title(raw: str) -> str:
+    """Make a YouTube title safe for the {title}{url}{&&} wire format.
+
+    Braces become parentheses: the receiving parser
+    (little_gucci._parse_video) splits on '}{', so a title carrying that
+    sequence would corrupt the record. Non-printable-ASCII (emoji, smart
+    quotes, em-dashes — common in real titles) collapses to spaces, matching
+    what _validate_input already does to typed titles.
+    """
+    text = (raw or "").replace("{", "(").replace("}", ")")
+    text = _NON_PRINTABLE_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:MAX_TITLE_LENGTH].strip()
+
+
+def fetch_youtube_title(video_id: str, timeout: int = 6) -> str:
+    """Return the video's title, or "" if it can't be retrieved.
+    Blocking — call from a worker thread."""
+    try:
+        query = urllib.parse.urlencode({
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "format": "json",
+        })
+        with urllib.request.urlopen(
+            f"{_OEMBED_URL}?{query}", timeout=timeout,
+            context=create_verified_ssl_context()
+        ) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return _clean_fetched_title(data.get("title", ""))
+    except Exception as e:
+        print(f"[YouTube] Title lookup failed for {video_id} — {e}")
+        return ""
+
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -74,8 +118,6 @@ def make_uppercase(field: QLineEdit) -> None:
             field.setCursorPosition(pos)
     field.textEdited.connect(to_upper)
 
-
-_NON_PRINTABLE_RE = re.compile(r"[^ -~]+")
 
 
 class _SanitizedLineEdit(QLineEdit):
@@ -96,6 +138,9 @@ class VideoDialog(QDialog):
     """Share YouTube Video dialog — post a YouTube link via the commstat.app server."""
 
     _commsrvr_result = QtCore.pyqtSignal(str)
+    # (video_id, title) — video_id lets a stale reply be discarded if the URL
+    # changed while the lookup was in flight.
+    _title_fetched = QtCore.pyqtSignal(str, str)
 
     def __init__(
         self,
@@ -110,6 +155,12 @@ class VideoDialog(QDialog):
         self._internet_available = bool(parent and getattr(parent, '_internet_available', True))
 
         self._commsrvr_result.connect(self._on_commsrvr_result)
+        self._title_fetched.connect(self._on_title_fetched)
+
+        # Auto-title state: which id we last looked up, and whether the
+        # operator has typed their own title (which auto-fill must not clobber).
+        self._title_fetch_id: str = ""
+        self._title_user_edited: bool = False
 
         apply_standard_dialog_chrome(self, "Share YouTube Video", _WIN_W, _WIN_H)
 
@@ -119,6 +170,17 @@ class VideoDialog(QDialog):
         self.group_combo.currentTextChanged.connect(self._on_group_changed)
         self.target_call_field.textChanged.connect(self._on_target_callsign_changed)
         make_uppercase(self.target_call_field)
+
+        # Look the title up a beat after typing/pasting settles, so a pasted
+        # URL doesn't fire a request per character.
+        self._title_lookup_timer = QtCore.QTimer(self)
+        self._title_lookup_timer.setSingleShot(True)
+        self._title_lookup_timer.setInterval(400)
+        self._title_lookup_timer.timeout.connect(self._start_title_lookup)
+        self.url_field.textChanged.connect(lambda _t: self._title_lookup_timer.start())
+        # textEdited fires only for real typing, not setText() — so auto-fill
+        # never marks itself as a manual edit.
+        self.title_field.textEdited.connect(self._on_title_edited)
 
     # =========================================================================
     # UI Construction
@@ -181,17 +243,9 @@ class VideoDialog(QDialog):
         target_row.addStretch()
         body.addLayout(target_row)
 
-        # ── Title field ───────────────────────────────────────────────────────
-        title_input_lbl = QLabel("Title:")
-        title_input_lbl.setFont(label_font())
-        body.addWidget(title_input_lbl)
-
-        self.title_field = _SanitizedLineEdit()
-        self.title_field.setMaxLength(MAX_TITLE_LENGTH)
-        self.title_field.setPlaceholderText(f"{MAX_TITLE_LENGTH} characters max")
-        body.addWidget(self.title_field)
-
         # ── URL field ─────────────────────────────────────────────────────────
+        # URL comes first: it's the only thing the operator has to supply, and
+        # the Title below fills itself in from it.
         url_input_lbl = QLabel("URL:")
         url_input_lbl.setFont(label_font())
         body.addWidget(url_input_lbl)
@@ -200,6 +254,16 @@ class VideoDialog(QDialog):
         self.url_field.setMaxLength(MAX_URL_LENGTH)
         self.url_field.setPlaceholderText(f"{MAX_URL_LENGTH} characters max")
         body.addWidget(self.url_field)
+
+        # ── Title field ───────────────────────────────────────────────────────
+        title_input_lbl = QLabel("Title:")
+        title_input_lbl.setFont(label_font())
+        body.addWidget(title_input_lbl)
+
+        self.title_field = _SanitizedLineEdit()
+        self.title_field.setMaxLength(MAX_TITLE_LENGTH)
+        self.title_field.setPlaceholderText(_TITLE_PLACEHOLDER)
+        body.addWidget(self.title_field)
 
         body.addStretch()
 
@@ -334,6 +398,49 @@ class VideoDialog(QDialog):
                 self.on_video_saved()
 
     # =========================================================================
+    # Auto title lookup
+    # =========================================================================
+
+    def _on_title_edited(self, text: str) -> None:
+        """Typing your own title wins over auto-fill. Emptying the box re-arms
+        auto-fill and re-runs the lookup, so clearing it brings the real
+        YouTube title back without having to re-paste the URL."""
+        self._title_user_edited = bool(text.strip())
+        if not self._title_user_edited:
+            self._title_fetch_id = ""
+            self._title_lookup_timer.start()
+
+    def _start_title_lookup(self) -> None:
+        """Kick off a background title lookup for the URL currently entered."""
+        if not self._internet_available:
+            return
+        video_id = _extract_youtube_id(self.url_field.text().strip())
+        if not video_id or video_id == self._title_fetch_id:
+            return
+        if self._title_user_edited:
+            return
+        self._title_fetch_id = video_id
+        self.title_field.setPlaceholderText("Fetching title…")
+
+        def lookup_thread(vid=video_id):
+            self._title_fetched.emit(vid, fetch_youtube_title(vid))
+
+        threading.Thread(target=lookup_thread, daemon=True).start()
+
+    def _on_title_fetched(self, video_id: str, title: str) -> None:
+        """Fill in a fetched title. The field stays editable — the operator can
+        reword it before sending."""
+        if video_id != self._title_fetch_id:
+            return          # a newer URL was entered while this was in flight
+        self.title_field.setPlaceholderText(_TITLE_PLACEHOLDER)
+        if not title:
+            # Leave the box empty and editable so the video can still be shared.
+            return
+        if self._title_user_edited:
+            return
+        self.title_field.setText(title)
+
+    # =========================================================================
     # Validation / message building
     # =========================================================================
 
@@ -343,12 +450,8 @@ class VideoDialog(QDialog):
             self.group_combo.setFocus()
             return None
 
-        title = re.sub(r"[^ -~]+", " ", self.title_field.text()).strip()
-        if len(title) < 1:
-            self._show_error("Title is required")
-            self.title_field.setFocus()
-            return None
-
+        # URL is validated first — it's the field the operator fills in, and
+        # the title is derived from it.
         url = re.sub(r"[^ -~]+", " ", self.url_field.text()).strip()
         if len(url) < 1:
             self._show_error("URL is required")
@@ -358,6 +461,12 @@ class VideoDialog(QDialog):
         if not _extract_youtube_id(url):
             self._show_error("URL must be a valid YouTube video link")
             self.url_field.setFocus()
+            return None
+
+        title = re.sub(r"[^ -~]+", " ", self.title_field.text()).strip()
+        if len(title) < 1:
+            self._show_error("Title is required")
+            self.title_field.setFocus()
             return None
 
         callsign, grid, state = self._get_internet_user_settings()

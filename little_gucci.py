@@ -117,7 +117,7 @@ SCOPE_RADIUS = {
     "My Location":     3,
     "My Community":   10,
     "My County":      16,
-    "My Region":      22,
+    "My Region":      24,
     "Other Location": 16,
 }
 # Fallback radius for an unknown/missing scope (treated like My Location).
@@ -746,6 +746,31 @@ class ClickableLabel(QtWidgets.QLabel):
         super().mousePressEvent(event)
 
 
+class UpperCaseLineEdit(QtWidgets.QLineEdit):
+    """QLineEdit that auto-uppercases typed and pasted text.
+
+    Uppercasing happens in keyPressEvent (typing) and insertFromMimeData
+    (paste / drag-drop) — the widget-level hooks that run before any
+    text-modified signal is emitted. Not a QValidator and not a
+    textChanged slot: rewriting text from inside a signal slot re-enters
+    Qt's dispatch loop, which corrupts the C++ iterator on Linux/Qt5.
+    """
+
+    def keyPressEvent(self, event):
+        text = event.text()
+        if text and text != text.upper():
+            self.insert(text.upper())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source):
+        if source is not None and source.hasText():
+            mime = QtCore.QMimeData()
+            mime.setText(source.text().upper())
+            super().insertFromMimeData(mime)
+
+
 # =============================================================================
 # Custom Web Engine Page for Map Links
 # =============================================================================
@@ -943,6 +968,19 @@ class CustomWebEnginePage(QWebEnginePage):
         if url_str == "commstat://video-delete":
             if hasattr(self.parent_widget, '_on_video_delete'):
                 self.parent_widget._on_video_delete()
+            return False
+
+        # Handle the Map Filter dropdown's Help entry
+        if url_str == "commstat://map-filter-help":
+            if hasattr(self.parent_widget, '_on_map_filter_help'):
+                self.parent_widget._on_map_filter_help()
+            return False
+
+        # Handle Map Filter state selection: commstat://map-filter-set/{off|map|custom}
+        if url.host() == "map-filter-set":
+            state = url.path().lstrip("/")
+            if hasattr(self.parent_widget, '_on_map_filter_set'):
+                self.parent_widget._on_map_filter_set(state)
             return False
 
         # Open USGS earthquake event links in the user's browser.
@@ -2273,6 +2311,21 @@ class _MenuBarMenu(QtWidgets.QMenu):
         super().showEvent(event)
 
 
+class _PersistentCheckMenu(_MenuBarMenu):
+    """Filter menu variant that stays open when a checkable item (group
+    filters, Hide Green Pins, etc.) is clicked, so several can be toggled
+    without reopening the menu each time. Non-checkable actions (e.g. the
+    date-range presets) still close the menu as normal."""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isCheckable() and action.isEnabled():
+            action.trigger()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 # =============================================================================
 
 class SoundPlayer:
@@ -2556,6 +2609,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hide_live_feed: bool = False          # Session-only; resets on restart
         self._hide_internet_statrep: bool = self.config.get_hide_internet_feed()
         self._hide_green_pins: bool = False         # Session-only; resets on restart
+        self._map_filter_state: str = "off"         # Session-only; resets on restart. One of: off, map, custom
+        self._map_bounds: Optional[Tuple[float, float, float, float]] = None  # (south, west, north, east); only set while _map_filter_state == "map"
+        self._custom_filter_mode: str = "and"       # Session-only; joins the Custom Filtering boxes. One of: and, or
 
         # Run startup status checks and initiate TCP connections.
         # Order: User Settings -> Groups -> JS8 Connectors -> QRZ Settings.
@@ -3183,7 +3239,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions[name] = action
 
         # Create the Filter menu
-        self.filter_menu = _MenuBarMenu("Filter", self.menubar)
+        self.filter_menu = _PersistentCheckMenu("Filter", self.menubar)
         self.menubar.addMenu(self.filter_menu)
 
         # Helper to create styled menu checkboxes
@@ -3576,7 +3632,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.network_toggle_btn = QtWidgets.QPushButton(self.header_widget)
         self.network_toggle_btn.setCheckable(True)
         self.network_toggle_btn.setFixedSize(118, 28)
-        self.network_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.network_toggle_btn.setFont(_btn_font)
         self.network_toggle_btn.clicked.connect(self._on_network_toggle_clicked)
         self.header_layout.addWidget(self.network_toggle_btn)
@@ -3662,6 +3717,11 @@ class MainWindow(QtWidgets.QMainWindow):
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
         header.resizeSection(0, 10)
+        # Explicitly mark the last column Stretch rather than relying on
+        # setStretchLastSection() to override its ResizeToContents mode —
+        # on Linux/X11 that combo can misattribute the extra width to an
+        # earlier column instead of the last one.
+        header.setSectionResizeMode(len(headers) - 1, QtWidgets.QHeaderView.Stretch)
         header.setStretchLastSection(True)
         table.verticalHeader().setVisible(False)
 
@@ -3673,14 +3733,213 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statrep_table.setRowCount(0)
 
         self._setup_table_widget(self.statrep_table, STATREP_HEADERS)
+        self.statrep_table.horizontalHeader().setFixedHeight(30)
 
         self.statrep_table.itemClicked.connect(self._on_statrep_click)
         self.statrep_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.statrep_table.customContextMenuRequested.connect(
             lambda pos: self._show_table_copy_menu(self.statrep_table, pos)
         )
+        self._hovered_callsign_item = None
+        self.statrep_table.viewport().setMouseTracking(True)
+        self.statrep_table.viewport().installEventFilter(self)
 
-        self.content_splitter.insertWidget(0, self.statrep_table)
+        # The Custom Filtering bar sits directly above the table's column
+        # headers, so both live in a container that takes the splitter slot.
+        self.statrep_container = QtWidgets.QWidget(self.central_widget)
+        _v = QtWidgets.QVBoxLayout(self.statrep_container)
+        _v.setContentsMargins(0, 0, 0, 0)
+        _v.setSpacing(0)
+        self._setup_custom_filter_bar()
+        _v.addWidget(self.custom_filter_bar)
+        _v.addWidget(self.statrep_table)
+
+        self.content_splitter.insertWidget(0, self.statrep_container)
+
+    def _setup_custom_filter_bar(self) -> None:
+        """Build the Custom Filtering row shown above the StatRep headers
+        while Map Filter is "custom". Four comma-separated criteria boxes
+        joined by an AND/OR toggle; hidden in every other filter state."""
+        self.custom_filter_bar = QtWidgets.QWidget(self.central_widget)
+        self.custom_filter_bar.setObjectName("customFilterBar")
+        self.custom_filter_bar.setFixedHeight(34)
+
+        row = QtWidgets.QHBoxLayout(self.custom_filter_bar)
+        row.setContentsMargins(10, 0, 10, 0)
+        row.setSpacing(6)
+
+        self._cf_title_label = QtWidgets.QLabel("CUSTOM FILTERING")
+        row.addWidget(self._cf_title_label)
+        row.addSpacing(18)
+
+        # Four criteria boxes with the AND/OR conjunction labels between them.
+        # Boxes are wide (150px) because each holds a comma-separated list;
+        # longer lists scroll horizontally within the box.
+        # No tooltips here - the rules are documented in the map's Filter > Help.
+        _FIELDS = [("from", "From="), ("to", "To="), ("id", "ID="), ("grid", "Grid=")]
+        self._cf_inputs: Dict[str, QtWidgets.QLineEdit] = {}
+        self._cf_field_labels: List[QtWidgets.QLabel] = []
+        self._cf_conj_labels: List[QtWidgets.QLabel] = []
+        for idx, (key, label_text) in enumerate(_FIELDS):
+            if idx:
+                conj = QtWidgets.QLabel(self._custom_filter_mode.upper())
+                conj.setAlignment(Qt.AlignCenter)
+                conj.setFixedWidth(34)
+                self._cf_conj_labels.append(conj)
+                row.addWidget(conj)
+
+            lbl = QtWidgets.QLabel(label_text)
+            self._cf_field_labels.append(lbl)
+            row.addWidget(lbl)
+
+            edit = UpperCaseLineEdit()
+            edit.setFixedSize(150, 22)
+            edit.setPlaceholderText("any")
+            edit.textChanged.connect(lambda _t: self._custom_filter_timer.start())
+            self._cf_inputs[key] = edit
+            row.addWidget(edit)
+
+        # "Use: AND" / "Use: OR" sit right after the last box so they read as
+        # part of the criteria sentence. Active one is filled.
+        row.addSpacing(14)
+        self._cf_mode_buttons: Dict[str, QtWidgets.QPushButton] = {}
+        for mode in ("and", "or"):
+            btn = QtWidgets.QPushButton(f"Use: {mode.upper()}")
+            btn.setFixedSize(74, 22)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _c, m=mode: self._on_custom_filter_mode(m))
+            self._cf_mode_buttons[mode] = btn
+            row.addWidget(btn)
+
+        row.addStretch(1)
+
+        # Help / Close pinned far right, using the app's standard dialog button
+        # colors (pink Help, gray Close - see ui_helpers.make_button callers).
+        self._cf_help_btn = QtWidgets.QPushButton("Help")
+        self._cf_close_btn = QtWidgets.QPushButton("Close")
+        self._cf_action_buttons = [
+            (self._cf_help_btn, "#e83e8c"),
+            (self._cf_close_btn, "#555555"),
+        ]
+        self._cf_help_btn.clicked.connect(lambda _c: self._on_map_filter_help())
+        self._cf_close_btn.clicked.connect(lambda _c: self._on_map_filter_set("off"))
+        for btn, _color in self._cf_action_buttons:
+            btn.setFixedSize(60, 22)
+            btn.setCursor(Qt.PointingHandCursor)
+            row.addWidget(btn)
+
+        # Re-filtering reloads the map (a full re-render), so coalesce
+        # keystrokes rather than firing on every one.
+        self._custom_filter_timer = QTimer(self)
+        self._custom_filter_timer.setSingleShot(True)
+        self._custom_filter_timer.setInterval(350)
+        self._custom_filter_timer.timeout.connect(self._apply_custom_filter)
+
+        self._style_custom_filter_bar()
+        self.custom_filter_bar.setVisible(False)
+
+    def _style_custom_filter_bar(self) -> None:
+        """Apply theme colors to the Custom Filtering bar. Shared by initial
+        setup and _apply_theme_styles so a theme switch restyles it too."""
+        # Bar takes the live feed's color pair, not the table header's - kept
+        # as a pair so the text stays legible if the feed colors are rethemed.
+        bar_bg = self.config.get_color('feed_background')
+        bar_fg = self.config.get_color('feed_foreground')
+
+        # Scoped to the objectName so it doesn't cascade into the children.
+        self.custom_filter_bar.setStyleSheet(
+            f"#customFilterBar {{ background-color: {bar_bg};"
+            " border: 1px solid #000000; }"
+        )
+        # Every label must declare a transparent background: central_widget
+        # carries a selector-less "background-color: {program_background}"
+        # stylesheet, which cascades into all descendants and would otherwise
+        # paint each label the program color instead of the bar's.
+        _bold = (f"background: transparent; color: {bar_fg};"
+                 " font-family: Roboto; font-weight: bold; font-size: 13px;")
+        self._cf_title_label.setStyleSheet(_bold)
+        for lbl in self._cf_field_labels:
+            lbl.setStyleSheet(_bold)
+        # Conjunctions are bold like the field labels, a point smaller so the
+        # field names still lead.
+        for lbl in self._cf_conj_labels:
+            lbl.setStyleSheet(
+                f"background: transparent; color: {bar_fg};"
+                " font-family: Roboto; font-weight: bold; font-size: 12px;"
+            )
+        for edit in self._cf_inputs.values():
+            edit.setStyleSheet(
+                "QLineEdit { background-color: #FFFFFF; color: #333333;"
+                " border: 1px solid rgba(0,0,0,0.25); border-radius: 3px;"
+                " padding: 1px 5px; font-family: Roboto; font-size: 12px; }"
+                "QLineEdit:focus { border: 1px solid #28a745; }"
+            )
+        # Fixed brand colors, scaled down to the bar's 22px button height.
+        for btn, color in self._cf_action_buttons:
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {color}; color: #FFFFFF;"
+                " border: none; border-radius: 4px;"
+                " font-family: Roboto; font-weight: bold; font-size: 12px; }"
+            )
+        self._refresh_custom_filter_mode_ui()
+
+    def _refresh_custom_filter_mode_ui(self) -> None:
+        """Sync the AND/OR pill styling and the conjunction labels to
+        self._custom_filter_mode."""
+        bar_fg = self.config.get_color('feed_foreground')
+        for mode, btn in self._cf_mode_buttons.items():
+            active = (mode == self._custom_filter_mode)
+            fill = "#28a745" if active else "rgba(255,255,255,0.16)"
+            fg = "#FFFFFF" if active else bar_fg
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {fill}; color: {fg};"
+                " border: none; border-radius: 4px;"
+                " font-family: Roboto; font-weight: bold; font-size: 12px; }}"
+            )
+        for lbl in self._cf_conj_labels:
+            lbl.setText(self._custom_filter_mode.upper())
+
+    def _on_custom_filter_mode(self, mode: str) -> None:
+        """AND/OR pill clicked - reflow the labels and re-filter immediately
+        (a single click needs no debounce)."""
+        if mode not in ("and", "or") or mode == self._custom_filter_mode:
+            return
+        self._custom_filter_mode = mode
+        self._refresh_custom_filter_mode_ui()
+        self._apply_custom_filter()
+
+    def _custom_filter_match(self, row) -> bool:
+        """True if a statrep row passes the Custom Filtering bar's criteria.
+
+        Within one box, comma-separated terms are always OR'd ("N0DDK, W1ABC"
+        matches either). Across boxes, the bar's AND/OR toggle decides. Empty
+        boxes impose no constraint; an entirely empty bar matches everything.
+        All matching is case-insensitive substring."""
+        if self._map_filter_state != "custom":
+            return True
+        pairs = [
+            (self._cf_inputs["from"].text(), row[3]),
+            (self._cf_inputs["to"].text(),   row[4]),
+            (self._cf_inputs["id"].text(),   row[5]),
+            (self._cf_inputs["grid"].text(), row[6]),
+        ]
+        results = []
+        for raw, field in pairs:
+            terms = [t.strip().upper() for t in raw.split(",") if t.strip()]
+            if not terms:
+                continue          # empty (or comma-only) box = no constraint
+            hay = str(field or "").upper()
+            results.append(any(t in hay for t in terms))
+        if not results:
+            return True
+        return any(results) if self._custom_filter_mode == "or" else all(results)
+
+    def _apply_custom_filter(self) -> None:
+        """Re-filter the table and map from the Custom Filtering bar."""
+        if self._map_filter_state != "custom":
+            return
+        self._load_statrep_data()
+        self._save_map_position(callback=self._load_map)
 
     def _setup_map_widget(self) -> None:
         """Create the map widget using QWebEngineView."""
@@ -3703,6 +3962,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.map_widget.setMinimumSize(320, 180)
         self.map_widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         self.map_stack.addWidget(self.map_widget)
+
+        # Polls the live Leaflet map's viewport bounds while Map Filter is
+        # "map" (see _poll_map_bounds); not started until that state is set.
+        self._map_bounds_timer = QtCore.QTimer(self)
+        self._map_bounds_timer.setInterval(750)
+        self._map_bounds_timer.timeout.connect(self._poll_map_bounds)
 
         # Setup map disabled label (hidden by default)
         self._setup_map_disabled_label()
@@ -5264,6 +5529,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_table_widget(self.message_table, [
             "", "Date Time", "Freq", "From", "To", "ID", "0 Messages"
         ])
+        self.message_table.horizontalHeader().setFixedHeight(30)
         self.message_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.message_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.message_table.setMinimumSize(320, 180)
@@ -5274,6 +5540,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_table.customContextMenuRequested.connect(
             lambda pos: self._show_table_copy_menu(self.message_table, pos)
         )
+        self.message_table.viewport().setMouseTracking(True)
+        self.message_table.viewport().installEventFilter(self)
 
         self.bottom_splitter.addWidget(self.message_table)
         self.bottom_splitter.setSizes([MAP_WIDTH, max(400, self.width() - MAP_WIDTH)])
@@ -5521,6 +5789,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_copy_shortcut(self) -> None:
         """Single Ctrl+C handler — dispatches to whichever table viewport has focus."""
         focused = QtWidgets.QApplication.focusWidget()
+        # Text inputs (Custom Filtering bar, contacts filter row) copy their
+        # own selection; without this the window-level shortcut swallows Ctrl+C.
+        if isinstance(focused, QtWidgets.QLineEdit):
+            focused.copy()
+            return
         if hasattr(self, 'contacts_table') and focused in (
             self.contacts_table, self.contacts_table.viewport()
         ):
@@ -5702,10 +5975,23 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"[Earthquake] map overlay failed: {e}")
 
+    def _grid_to_latlon(self, grid: str) -> Optional[Tuple[float, float]]:
+        """Convert a Maidenhead grid square to (lat, lon), or None if invalid."""
+        try:
+            coords = mh.to_location(grid, center=True)
+            return float(coords[0]), float(coords[1])
+        except Exception:
+            return None
+
     def _load_map(self, callback=None) -> None:
         """Generate and display the folium map with StatRep pins."""
         filters = self.config.filter_settings
-        groups, exclude_groups, show_all = self._get_filtered_groups()
+        # Map Filter "map"/"custom" states ignore the Filter menu's group/hide
+        # selections entirely and start from every StatRep for the date range.
+        if self._map_filter_state in ("map", "custom"):
+            groups, exclude_groups, show_all = [], [], True
+        else:
+            groups, exclude_groups, show_all = self._get_filtered_groups()
 
         # Use saved map position or default to US center
         if not hasattr(self, 'map_center'):
@@ -5814,11 +6100,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 status = str(row[8])  # map (status)
                 statrep_id = row[22]  # database primary key (unique)
 
+                # Custom Filtering bar drops non-matching rows before any of
+                # the per-pin work below (and before the duplicate-grid jitter
+                # bookkeeping, so only pins that render get offset).
+                if self._map_filter_state == "custom" and not self._custom_filter_match(row):
+                    continue
+
                 # Convert grid to coordinates
                 try:
-                    coords = mh.to_location(grid, center=True)
-                    lat = float(coords[0])
-                    lon = float(coords[1])
+                    coords = self._grid_to_latlon(grid)
+                    if coords is None:
+                        raise ValueError(f"invalid grid: {grid}")
+                    lat, lon = coords
 
                     # Offset duplicate grids
                     count = gridlist.count(grid)
@@ -5882,13 +6175,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     iframe = folium.IFrame(html, width=208, height=148)
                     popup = folium.Popup(iframe, min_width=208, max_width=208)
 
-                    # Skip green pins when filter is active
-                    if self._hide_green_pins and status == "1":
-                        continue
+                    # Map Filter "map"/"custom" states bypass these entirely.
+                    if self._map_filter_state not in ("map", "custom"):
+                        # Skip green pins when filter is active
+                        if self._hide_green_pins and status == "1":
+                            continue
 
-                    # Skip internet-sourced statreps when filter is active
-                    if self._hide_internet_statrep and row[21] != 1:
-                        continue
+                        # Skip internet-sourced statreps when filter is active
+                        if self._hide_internet_statrep and row[21] != 1:
+                            continue
 
                     # Count this pin against any region whose bounding box contains it
                     for _region, (_lat_min, _lat_max, _lng_min, _lng_max) in REGION_BBOX.items():
@@ -5910,7 +6205,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     radius = SCOPE_RADIUS.get(scope, SCOPE_RADIUS_DEFAULT)
 
-                    # Slow pulse halo goes underneath the solid marker.
+                    # Soft halo goes underneath the solid marker.
                     # Halo radius grows with scope; solid is always 8px (radius 4).
                     # interactive=False prevents the halo from stealing clicks from the popup marker.
                     folium.CircleMarker(
@@ -5955,17 +6250,8 @@ class MainWindow(QtWidgets.QMainWindow):
         m.save(map_data, close_file=False)
 
         map_html = map_data.getvalue().decode()
-        pulse_css = """
+        popup_css = """
 <style>
-@keyframes commstatMarkerSlowPulse {
-  0%   { opacity: .40; }
-  50%  { opacity: 1.00; }
-  100% { opacity: .40; }
-}
-/* Leaflet renders CircleMarker objects as SVG paths with this class. */
-.leaflet-overlay-pane svg path.leaflet-interactive {
-  animation: commstatMarkerSlowPulse 2.4s ease-in-out infinite !important;
-}
 .leaflet-popup-content-wrapper {
   background: transparent !important;
   box-shadow: none !important;
@@ -5981,25 +6267,9 @@ class MainWindow(QtWidgets.QMainWindow):
 </style>
 """
         try:
-            map_html = map_html.replace("</head>", pulse_css + "</head>", 1)
+            map_html = map_html.replace("</head>", popup_css + "</head>", 1)
         except Exception:
             pass
-
-
-        # Soft pulse for RED status pins
-        pulse_css = """
-<style>
-@keyframes commstatPulseRed {
-  0% {opacity:0.45;}
-  50% {opacity:1.0;}
-  100% {opacity:0.45;}
-}
-path[fill="red"], circle[fill="red"] {
-  animation: commstatPulseRed 1.8s ease-in-out infinite;
-}
-</style>
-"""
-        map_html = map_html.replace("</head>", pulse_css + "</head>")
 
         bounce_css = """
 <style>
@@ -6023,6 +6293,122 @@ path[fill="red"], circle[fill="red"] {
 </style>
 """
         map_html = map_html.replace('</head>', bounce_css + '</head>')
+
+        # Map Filter button - top-right overlay, same visual language as the
+        # Videos player's Prev/Next/Delete buttons (rgba(0,0,0,0.65) glass).
+        # Three states: Off (hidden unless the mouse is over the map, same
+        # body:hover trick as the video player's Prev/Next), Map (green,
+        # always visible) and Custom (purple, always visible). Clicking opens
+        # a small dropdown to pick the state; only the display state is
+        # wired up here, actual filtering behavior is added separately.
+        filter_btn_css = """
+<style>
+#commstatMapFilterWrap {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 10000;
+  font-family: sans-serif;
+  font-size: 13px;
+}
+#commstatMapFilterBtn {
+  display: block;
+  min-width: 110px;
+  text-align: center;
+  background: rgba(0,0,0,0.65);
+  color: #fff;
+  border: 1px solid #999;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-weight: bold;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s ease, background-color .15s ease;
+}
+body:hover #commstatMapFilterBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+#commstatMapFilterBtn.commstat-filter-map {
+  background: rgba(40,167,69,0.85);
+  border-color: #28a745;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+#commstatMapFilterBtn.commstat-filter-custom {
+  background: rgba(111,66,193,0.85);
+  border-color: #6f42c1;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+#commstatMapFilterMenu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: rgba(0,0,0,0.85);
+  border: 1px solid #999;
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 110px;
+}
+#commstatMapFilterMenu.commstat-menu-open {
+  display: block;
+}
+#commstatMapFilterMenu button {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
+  color: #fff;
+  border: none;
+  padding: 6px 12px;
+  text-align: left;
+  font-family: sans-serif;
+  font-size: 13px;
+  cursor: pointer;
+}
+#commstatMapFilterMenu button:hover {
+  background: rgba(255,255,255,0.15);
+}
+/* Help isn't a filter state - a rule sets it apart from the three modes. */
+#commstatMapFilterMenu button.commstat-menu-help {
+  border-top: 1px solid rgba(255,255,255,0.25);
+}
+</style>
+"""
+        map_html = map_html.replace('</head>', filter_btn_css + '</head>')
+
+        filter_state = getattr(self, '_map_filter_state', 'off')
+        if filter_state not in ('off', 'map', 'custom'):
+            filter_state = 'off'
+        _FILTER_LABELS = {'off': 'FILTER: OFF', 'map': 'FILTER: MAP', 'custom': 'FILTER: CUSTOM'}
+        filter_btn_class = f' class="commstat-filter-{filter_state}"' if filter_state != 'off' else ''
+        filter_btn_html = f"""
+<div id="commstatMapFilterWrap">
+  <button id="commstatMapFilterBtn"{filter_btn_class}
+    onclick="document.getElementById('commstatMapFilterMenu').classList.toggle('commstat-menu-open');">{_FILTER_LABELS[filter_state]}</button>
+  <div id="commstatMapFilterMenu">
+    <button onclick="window.location='commstat://map-filter-set/off';">Off</button>
+    <button onclick="window.location='commstat://map-filter-set/map';">Map</button>
+    <button onclick="window.location='commstat://map-filter-set/custom';">Custom</button>
+    <button class="commstat-menu-help"
+      onclick="document.getElementById('commstatMapFilterMenu').classList.remove('commstat-menu-open');window.location='commstat://map-filter-help';">Help</button>
+  </div>
+</div>
+<script>
+document.addEventListener('click', function(e) {{
+  var wrap = document.getElementById('commstatMapFilterWrap');
+  var menu = document.getElementById('commstatMapFilterMenu');
+  if (wrap && menu && !wrap.contains(e.target)) {{
+    menu.classList.remove('commstat-menu-open');
+  }}
+}});
+</script>
+"""
+        map_html = map_html.replace('</body>', filter_btn_html + '\n</body>')
 
         # Circle marker popups open on click and stay until user clicks elsewhere.
         hover_js = """<script>
@@ -6202,14 +6588,58 @@ window.commstatBouncePin = function(srid) {
 
         self.map_widget.page().runJavaScript(js_code, handle_result)
 
+    def _poll_map_bounds(self) -> None:
+        """While Map Filter is "map", periodically read the live Leaflet
+        map's viewport bounds so the StatRep table can be restricted to only
+        pins currently on screen. Polling (rather than a moveend/zoomend push
+        from JS) sidesteps QWebEngineView blocking script-initiated
+        navigation from a data: URL without real user-gesture activation."""
+        if self._map_filter_state != "map" or not self.map_loaded:
+            return
+
+        js_code = """
+        (function() {
+            try {
+                var mapId = Object.keys(window).find(k => k.startsWith('map_'));
+                if (mapId && window[mapId]) {
+                    var b = window[mapId].getBounds();
+                    return JSON.stringify({s: b.getSouth(), w: b.getWest(), n: b.getNorth(), e: b.getEast()});
+                }
+            } catch(e) {}
+            return null;
+        })();
+        """
+        self.map_widget.page().runJavaScript(js_code, self._on_map_bounds_result)
+
+    def _on_map_bounds_result(self, result) -> None:
+        if not result:
+            return
+        try:
+            data = json.loads(result)
+            bounds = (data['s'], data['w'], data['n'], data['e'])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return
+        if bounds == self._map_bounds:
+            return
+        self._map_bounds = bounds
+        self._load_statrep_data()
+
     def _load_statrep_data(self) -> None:
         """Load StatRep data from database into the table."""
         filters = self.config.filter_settings
-        groups, exclude_groups, show_all = self._get_filtered_groups()
+        state = self._map_filter_state
+        bypass_menu = state in ("map", "custom")
 
-        user_callsign = next((cs for cs in self.rig_callsigns.values() if cs), "") or ""
-        if not user_callsign:
-            user_callsign, _, __ = self.db.get_user_settings()
+        # Map Filter "map"/"custom" states ignore the Filter menu's group/hide
+        # selections entirely, matching what the map itself plots.
+        if bypass_menu:
+            groups, exclude_groups, show_all = [], [], True
+            user_callsign = ""
+        else:
+            groups, exclude_groups, show_all = self._get_filtered_groups()
+            user_callsign = next((cs for cs in self.rig_callsigns.values() if cs), "") or ""
+            if not user_callsign:
+                user_callsign, _, __ = self.db.get_user_settings()
 
         # Fetch data from database
         data = self.db.get_statrep_data(
@@ -6221,10 +6651,23 @@ window.commstatBouncePin = function(srid) {
             user_callsign=user_callsign
         )
 
-        if self._hide_internet_statrep:
-            data = [row for row in data if row[21] == 1]
-        if self._hide_green_pins:
-            data = [row for row in data if str(row[8]) != "1"]
+        if not bypass_menu:
+            if self._hide_internet_statrep:
+                data = [row for row in data if row[21] == 1]
+            if self._hide_green_pins:
+                data = [row for row in data if str(row[8]) != "1"]
+        elif state == "map":
+            if self._map_bounds:
+                # Only records whose pin currently falls inside the map's
+                # visible viewport - panning/zooming the map live-narrows this.
+                south, west, north, east = self._map_bounds
+                def _pin_in_view(row):
+                    coords = self._grid_to_latlon(row[6])
+                    return coords is not None and south <= coords[0] <= north and west <= coords[1] <= east
+                data = [row for row in data if _pin_in_view(row)]
+        elif state == "custom":
+            # Same criteria the map's pin loop applies, so both stay in sync.
+            data = [row for row in data if self._custom_filter_match(row)]
 
         # Status color mapping for values 1-4
         status_colors = {
@@ -6396,6 +6839,15 @@ window.commstatBouncePin = function(srid) {
     def _resolve_dialog_class(self, module_name: str, class_name: str):
         import importlib
         return getattr(importlib.import_module(module_name), class_name)
+
+    def _help_theme_colors(self) -> dict:
+        """Live theme colors for help popups, so they track a theme change
+        instead of being stuck on the DEFAULT_COLORS baked in at import."""
+        return {
+            'panel_bg': self.config.get_color('module_background'),
+            'prog_bg': self.config.get_color('program_background'),
+            'prog_fg': self.config.get_color('program_foreground'),
+        }
 
     def _on_help(self) -> None:
         HelpDialogCls = self._resolve_dialog_class("help", "HelpDialog")
@@ -6712,7 +7164,41 @@ window.commstatBouncePin = function(srid) {
             elif event.type() == QtCore.QEvent.Leave:
                 self._image_hovering = False
                 self._update_image_nav_visibility()
+        elif hasattr(self, 'statrep_table') and obj is self.statrep_table.viewport():
+            self._handle_callsign_hover(self.statrep_table, event)
+        elif hasattr(self, 'message_table') and obj is self.message_table.viewport():
+            self._handle_callsign_hover(self.message_table, event)
         return super().eventFilter(obj, event)
+
+    def _handle_callsign_hover(self, table, event) -> None:
+        """Underline the From-callsign (and, for StatRep, ID) cell under the mouse
+        to signal it's clickable."""
+        _FROM_COL = 3
+        _ID_COL = 5
+        clickable_cols = {_FROM_COL, _ID_COL} if table is self.statrep_table else {_FROM_COL}
+        if event.type() == QtCore.QEvent.MouseMove:
+            index = table.indexAt(event.pos())
+            item = table.item(index.row(), index.column()) if index.isValid() and index.column() in clickable_cols else None
+        elif event.type() == QtCore.QEvent.Leave:
+            item = None
+        else:
+            return
+
+        if item is self._hovered_callsign_item:
+            return
+
+        if self._hovered_callsign_item is not None:
+            font = self._hovered_callsign_item.font()
+            font.setUnderline(False)
+            self._hovered_callsign_item.setFont(font)
+
+        # Underline alone signals "clickable" - the cursor stays an arrow.
+        if item is not None:
+            font = item.font()
+            font.setUnderline(True)
+            item.setFont(font)
+
+        self._hovered_callsign_item = item
 
     def _on_map_pane_resized(self) -> None:
         """Refit the map pane's content once a resize settles."""
@@ -6876,6 +7362,32 @@ window.commstatBouncePin = function(srid) {
         self._load_statrep_data()
         self._save_map_position(callback=self._load_map)
 
+    def _on_map_filter_help(self) -> None:
+        """Open the Map Filter help module from the map's dropdown."""
+        show = self._resolve_dialog_class("help", "show_map_filter_help")
+        show(self, **self._help_theme_colors())
+
+    def _on_map_filter_set(self, state: str) -> None:
+        """Set Map Filter to Off/Map/Custom. Both "Map" and "Custom" ignore the
+        Filter menu's group/hide selections and start from every StatRep in the
+        date range; "Map" then restricts the table to the map's viewport, while
+        "Custom" applies the Custom Filtering bar to both table and map."""
+        if state not in ("off", "map", "custom"):
+            return
+        self._map_filter_state = state
+        self.custom_filter_bar.setVisible(state == "custom")
+        if state == "map":
+            self._map_bounds = None
+            self._map_bounds_timer.start()
+            # Poll immediately against the still-loaded pre-reload map so the
+            # table narrows right away instead of waiting for the first tick.
+            self._poll_map_bounds()
+        else:
+            self._map_bounds_timer.stop()
+            self._map_bounds = None
+            self._load_statrep_data()
+        self._save_map_position(callback=self._load_map)
+
     def _set_map_theme(self, theme):
         try:
             self.config.set_map_theme(theme)
@@ -7012,9 +7524,8 @@ window.commstatBouncePin = function(srid) {
 
     def _on_alerts_messages_help(self) -> None:
         """Explain the 'Save all Alerts' / 'Save all Messages' checkboxes."""
-        Cls = self._resolve_dialog_class("help", "AlertsMessagesHelpDialog")
-        dlg = Cls(self)
-        dlg.exec_()
+        show = self._resolve_dialog_class("help", "show_alerts_messages_help")
+        show(self, **self._help_theme_colors())
 
     def _on_toggle_hide_live_feed(self, checked: bool) -> None:
         """Hide/show the live feed. Session-only — resets on restart."""
@@ -7071,9 +7582,15 @@ window.commstatBouncePin = function(srid) {
             data: List of row tuples
             status_colors: Optional dict mapping values to config color keys
         """
-        table.setRowCount(0)
         is_message_table = (table == self.message_table)
         is_statrep_table = (table == self.statrep_table)
+
+        # setRowCount(0) below deletes all items; drop any stale hover reference
+        # first so _handle_callsign_hover never touches a freed QTableWidgetItem.
+        if is_message_table or is_statrep_table:
+            self._hovered_callsign_item = None
+            table.viewport().setCursor(Qt.ArrowCursor)
+        table.setRowCount(0)
 
         # Pre-fetch QRZ callsigns and user callsign for bold highlighting
         qrz_callsigns = self.db.get_qrz_callsigns()
@@ -8727,11 +9244,15 @@ window.commstatBouncePin = function(srid) {
             # Tables
             if hasattr(self, "statrep_table"):
                 self._setup_table_widget(self.statrep_table, STATREP_HEADERS)
+                self.statrep_table.horizontalHeader().setFixedHeight(30)
+            if hasattr(self, "custom_filter_bar"):
+                self._style_custom_filter_bar()
             if hasattr(self, "message_table"):
                 self._setup_table_widget(self.message_table, [
                     "", "Date Time", "Freq", "From", "To", "ID",
                     self.message_table.horizontalHeaderItem(6).text() if self.message_table.horizontalHeaderItem(6) else "0 Messages"
                 ])
+                self.message_table.horizontalHeader().setFixedHeight(30)
             if hasattr(self, "contacts_table"):
                 headers = [
                     "Callsign", "Name", "Address", "City", "State",

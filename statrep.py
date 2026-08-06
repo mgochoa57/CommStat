@@ -27,12 +27,13 @@ from PyQt5.QtWidgets import QMessageBox, QDialog, QComboBox
 from constants import (
     DEFAULT_COLORS, COLOR_INPUT_TEXT, COLOR_INPUT_BORDER,
     COLOR_DISABLED_BG, COLOR_DISABLED_TEXT,
-    COLOR_BTN_GREEN, COLOR_BTN_BLUE, COLOR_BTN_CYAN,
+    COLOR_BTN_GREEN, COLOR_BTN_BLUE, COLOR_BTN_CYAN, COLOR_BTN_HELP,
     RIG_FETCH_DELAY_MS, RIG_FREQ_DELAY_MS,
 )
 from id_utils import generate_time_based_id
 from little_gucci import create_verified_ssl_context
-from ui_helpers import make_button, label_font, mono_font, apply_standard_dialog_chrome, connect_single
+from ui_helpers import (make_button, label_font, mono_font, apply_standard_dialog_chrome,
+                        connect_single, show_help_dialog)
 
 if TYPE_CHECKING:
     from js8_tcp_client import TCPConnectionPool
@@ -98,6 +99,44 @@ STATUS_COLORS = {
     "Unknown": "#6c757d",
 }
 
+# ── Help content ──────────────────────────────────────────────────────────────
+# Lives beside the feature it documents: change a Mode or a status color here
+# and the help text is in the same file. Chrome comes from ui_helpers.
+
+_HELP_HTML = f"""
+<div style="font-family: Roboto; font-size: 13px; color: #333333;">
+
+<h3 style="color:#555555;">Mode</h3>
+<table cellspacing="2" cellpadding="2">
+<tr><td><b>Slow</b></td><td>&nbsp;&nbsp;8 WPM</td></tr>
+<tr><td><b>Normal</b></td><td>&nbsp;&nbsp;16 WPM</td></tr>
+<tr><td><b>Fast</b></td><td>&nbsp;&nbsp;24 WPM</td></tr>
+<tr><td><b>Turbo</b></td><td>&nbsp;&nbsp;40 WPM</td></tr>
+<tr><td><b>Ultra</b></td><td>&nbsp;&nbsp;60 WPM&nbsp;&nbsp;<b>(Use only for JS8Call 3.0.1 or greater)</b></td></tr>
+</table>
+
+<h3 style="color:#555555;">Delivery</h3>
+<ul>
+<li><b>Maximum Reach</b> &mdash; RF + Internet</li>
+<li><b>Limited Reach</b> &mdash; RF Only</li>
+</ul>
+
+<h3 style="color:#555555;">Color Selection</h3>
+<table cellspacing="0" cellpadding="8" width="100%">
+<tr>
+  <td bgcolor="{STATUS_COLORS['Green']}" align="center" width="33%">
+      <b style="color:#FFFFFF;">Green</b><br><span style="color:#FFFFFF;">Normal</span></td>
+  <td bgcolor="{STATUS_COLORS['Yellow']}" align="center" width="33%">
+      <b style="color:#000000;">Yellow</b><br><span style="color:#000000;">Limited</span></td>
+  <td bgcolor="{STATUS_COLORS['Red']}" align="center">
+      <b style="color:#FFFFFF;">Red</b><br><span style="color:#FFFFFF;">Collapsed/None</span></td>
+</tr>
+</table>
+
+</div>
+"""
+
+
 WINDOW_WIDTH = 700
 WINDOW_HEIGHT = 510
 WINDOW_HEIGHT_EXPANDED = 650
@@ -114,7 +153,7 @@ _PANEL_FG   = DEFAULT_COLORS.get("module_foreground",   "#000000")
 _COL_CANCEL = "#555555"
 _COL_GRAY   = "#6c757d"
 _COL_PURPLE = "#6f42c1"
-_COL_PINK   = "#e83e8c"
+_COL_PINK   = COLOR_BTN_HELP
 
 
 # =============================================================================
@@ -879,112 +918,7 @@ class StatRepDialog(QDialog):
 
     def _on_help_clicked(self, _link: str = "") -> None:
         """Show a styled help dialog explaining Mode, Delivery, and Color selection."""
-        dlg = QDialog(self)
-        apply_standard_dialog_chrome(dlg, "Status Report Help")
-        dlg.setFixedWidth(460)
-
-        dlg.setStyleSheet(f"""
-            QDialog {{ background-color: {_PANEL_BG}; }}
-            QLabel  {{ color: {_PANEL_FG}; background-color: transparent; font-size: 13px; }}
-        """)
-
-        layout = QtWidgets.QVBoxLayout(dlg)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(10)
-
-        title = QtWidgets.QLabel("Status Report Help")
-        title.setAlignment(Qt.AlignCenter)
-        title.setFont(QtGui.QFont("Roboto Slab", -1, QtGui.QFont.Black))
-        title.setFixedHeight(36)
-        title.setStyleSheet(
-            f"QLabel {{ background-color:{_PROG_BG}; color:{_PROG_FG};"
-            f" font-family:'Roboto Slab'; font-size:16px; font-weight:900;"
-            f" padding-top:9px; padding-bottom:9px; }}"
-        )
-        layout.addWidget(title)
-
-        def _section_header(text: str) -> QtWidgets.QLabel:
-            lbl = QtWidgets.QLabel(text)
-            lbl.setStyleSheet(
-                "QLabel { background-color: transparent; color: #000000;"
-                " font-family: Roboto; font-size: 13px; font-weight: bold;"
-                " padding-bottom: 2px; border-bottom: 1px solid #999999; }"
-            )
-            return lbl
-
-        def _body_label(html: str) -> QtWidgets.QLabel:
-            lbl = QtWidgets.QLabel(html)
-            lbl.setTextFormat(Qt.RichText)
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet(
-                "QLabel { background-color: transparent; color: #000000;"
-                " font-family: Roboto; font-size: 13px; padding-left: 8px; }"
-            )
-            return lbl
-
-        # Mode section
-        layout.addWidget(_section_header("Mode"))
-        layout.addWidget(_body_label(
-            "<table cellspacing='2' cellpadding='1'>"
-            "<tr><td><b>Slow</b></td><td>&nbsp;&nbsp;8 WPM</td></tr>"
-            "<tr><td><b>Normal</b></td><td>&nbsp;&nbsp;16 WPM</td></tr>"
-            "<tr><td><b>Fast</b></td><td>&nbsp;&nbsp;24 WPM</td></tr>"
-            "<tr><td><b>Turbo</b></td><td>&nbsp;&nbsp;40 WPM</td></tr>"
-            "<tr><td><b>Ultra</b></td><td>&nbsp;&nbsp;60 WPM <i>(new)</i></td></tr>"
-            "</table>"
-        ))
-
-        # Delivery section
-        layout.addWidget(_section_header("Delivery"))
-        layout.addWidget(_body_label(
-            "<b>Maximum Reach</b> &mdash; RF + Internet<br>"
-            "<b>Limited Reach</b> &mdash; RF Only"
-        ))
-
-        # Color Selection section
-        layout.addWidget(_section_header("Color Selection"))
-        color_row = QtWidgets.QHBoxLayout()
-        color_row.setSpacing(8)
-        color_row.setContentsMargins(8, 0, 0, 0)
-
-        def _swatch(label: str, bg: str, fg: str, meaning: str) -> QtWidgets.QWidget:
-            box = QtWidgets.QFrame()
-            box.setStyleSheet(
-                f"QFrame {{ background-color: {bg}; border-radius: 4px; }}"
-                f"QLabel {{ background-color: transparent; color: {fg};"
-                f" font-family: Roboto; font-size: 13px; font-weight: bold; }}"
-            )
-            v = QtWidgets.QVBoxLayout(box)
-            v.setContentsMargins(8, 6, 8, 6)
-            v.setSpacing(2)
-            name = QtWidgets.QLabel(label)
-            name.setAlignment(Qt.AlignCenter)
-            desc = QtWidgets.QLabel(meaning)
-            desc.setAlignment(Qt.AlignCenter)
-            desc.setStyleSheet(
-                f"QLabel {{ background-color: transparent; color: {fg};"
-                f" font-family: Roboto; font-size: 13px; font-weight: normal; }}"
-            )
-            v.addWidget(name)
-            v.addWidget(desc)
-            return box
-
-        color_row.addWidget(_swatch("Green",  STATUS_COLORS["Green"],  "#FFFFFF", "Normal"))
-        color_row.addWidget(_swatch("Yellow", STATUS_COLORS["Yellow"], "#000000", "Limited"))
-        color_row.addWidget(_swatch("Red",    STATUS_COLORS["Red"],    "#FFFFFF", "Collapsed/None"))
-        layout.addLayout(color_row)
-
-        layout.addSpacing(4)
-
-        # Close button
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch()
-        btn_close = make_button("Close", _COL_CANCEL)
-        btn_close.clicked.connect(dlg.accept)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
-
-        dlg.exec_()
+        show_help_dialog(self, "Status Report Help", _HELP_HTML, width=470, height=430)
 
     def _on_commsrvr_error(self, message: str) -> None:
         from qrz_lookup import InternetDeliveryFailureDialog

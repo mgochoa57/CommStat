@@ -16,13 +16,14 @@ from PyQt5 import QtGui
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QPushButton, QLineEdit, QCheckBox, QComboBox, QWidget, QHBoxLayout, QMessageBox,
+    QDialog, QVBoxLayout, QLabel, QTextBrowser,
 )
 
 from constants import (
     FONT_ROBOTO, FONT_MONO, FONT_ROBOTO_STACK, FONT_MONO_STACK,
-    COLOR_BTN_GREEN, COLOR_BTN_GRAY, COLOR_BTN_BLUE,
+    COLOR_BTN_GREEN, COLOR_BTN_GRAY, COLOR_BTN_BLUE, COLOR_BTN_CLOSE,
     COLOR_INPUT_TEXT, COLOR_INPUT_BORDER,
-    ICON_FILE,
+    DEFAULT_COLORS, ICON_FILE,
 )
 
 
@@ -170,3 +171,84 @@ def apply_standard_dialog_chrome(dialog, title: str, w: int = 0, h: int = 0) -> 
         dialog.setFixedSize(w, h)
     if os.path.exists(ICON_FILE):
         dialog.setWindowIcon(QtGui.QIcon(ICON_FILE))
+
+
+# ── Help dialogs ───────────────────────────────────────────────────────────────
+
+# Every CommStat help popup shares this shape: a Roboto Slab title strip in the
+# program colors, an HTML body, and a Close button. Feature modules supply only
+# the body — the scaffolding lives here so all five popups stay identical and
+# nobody re-implements the chrome.
+_HELP_BODY_CSS = """
+QTextBrowser { background-color: #FFFFFF; border: 1px solid #C8C8C8; padding: 10px; }
+"""
+
+
+def make_help_dialog(parent, title: str, body_html: str,
+                     width: int = 460, height: int = 0,
+                     panel_bg: str = None, prog_bg: str = None,
+                     prog_fg: str = None) -> QDialog:
+    """Build (but do not show) a standard CommStat help dialog.
+
+    Args:
+        parent:     Dialog parent.
+        title:      Shown both in the OS title bar and the colored title strip.
+        body_html:  Rich-text body. Qt supports a subset of HTML/CSS —
+                    headings, <b>/<i>, <ul>, <table bgcolor=…> all render.
+        width:      Dialog width.
+        height:     Fixed height; 0 makes the dialog resizable, which is the
+                    better default once the body is long enough to scroll.
+        panel_bg / prog_bg / prog_fg:
+                    Optional live theme colors. Callers with access to the
+                    running ConfigManager can pass them so the popup tracks a
+                    theme change; everyone else gets the DEFAULT_COLORS values.
+
+    Returns the QDialog so callers can exec_() or show() it.
+    """
+    panel_bg = panel_bg or DEFAULT_COLORS.get("module_background", "#E4E4E4")
+    prog_bg = prog_bg or DEFAULT_COLORS.get("program_background", "#A52A2A")
+    prog_fg = prog_fg or DEFAULT_COLORS.get("program_foreground", "#FFFFFF")
+
+    dlg = QDialog(parent)
+    apply_standard_dialog_chrome(dlg, title)
+    if height:
+        dlg.setFixedSize(width, height)
+    else:
+        dlg.setMinimumSize(min(width, 620), 420)
+        dlg.resize(width, 560)
+    dlg.setStyleSheet(f"QDialog {{ background-color: {panel_bg}; }}")
+
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(15, 15, 15, 15)
+    layout.setSpacing(10)
+
+    title_lbl = QLabel(title)
+    title_lbl.setAlignment(Qt.AlignCenter)
+    title_lbl.setStyleSheet(
+        "font-family: 'Roboto Slab'; font-size: 16px; font-weight: 900;"
+        f"background-color: {prog_bg}; color: {prog_fg}; padding: 9px 0px;"
+    )
+    layout.addWidget(title_lbl)
+
+    body = QTextBrowser()
+    body.setOpenExternalLinks(True)
+    body.setStyleSheet(_HELP_BODY_CSS)
+    body.setHtml(body_html)
+    body.moveCursor(QtGui.QTextCursor.Start)
+    layout.addWidget(body, 1)
+
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(8)
+    btn_row.addStretch()
+    close_btn = make_button("Close", COLOR_BTN_CLOSE, 80)
+    close_btn.clicked.connect(dlg.close)
+    btn_row.addWidget(close_btn)
+    layout.addLayout(btn_row)
+
+    return dlg
+
+
+def show_help_dialog(parent, title: str, body_html: str,
+                     width: int = 460, height: int = 0, **colors) -> None:
+    """Build and modally show a standard CommStat help dialog."""
+    make_help_dialog(parent, title, body_html, width, height, **colors).exec_()

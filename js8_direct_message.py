@@ -30,11 +30,13 @@ from constants import (
     COLOR_INPUT_TEXT, COLOR_INPUT_BORDER,
     COLOR_DISABLED_BG, COLOR_DISABLED_TEXT,
     COLOR_BTN_BLUE, COLOR_BTN_RED, COLOR_BTN_CYAN,
+    COLOR_BTN_HELP, COLOR_BTN_CLOSE,
     CONTACTS_RETENTION_HOURS,
 )
 from id_utils import generate_time_based_id
 from qrz_client import get_qrz_cached
-from ui_helpers import make_button, apply_standard_dialog_chrome, connect_single
+from ui_helpers import (make_button, apply_standard_dialog_chrome, connect_single,
+                        show_help_dialog)
 
 if TYPE_CHECKING:
     from js8_tcp_client import TCPConnectionPool
@@ -73,8 +75,82 @@ _PROG_BG    = DEFAULT_COLORS.get("program_background",   "#A52A2A")
 _PROG_FG    = DEFAULT_COLORS.get("program_foreground",   "#FFFFFF")
 _PANEL_BG   = DEFAULT_COLORS.get("module_background",    "#DDDDDD")
 _PANEL_FG   = DEFAULT_COLORS.get("module_foreground",    "#000000")
-_COL_HELP   = "#e83e8c"  # matches StatRep help button
-_COL_CANCEL = "#555555"
+_COL_HELP   = COLOR_BTN_HELP
+_COL_CANCEL = COLOR_BTN_CLOSE
+
+# ── Help content ──────────────────────────────────────────────────────────────
+# Beside the feature it documents. Two columns are a table here rather than a
+# pair of QVBoxLayouts; chrome comes from ui_helpers.
+
+_HELP_HTML = f"""
+<div style="font-family: Roboto; font-size: 13px; color: #333333;">
+<table width="100%" cellspacing="0" cellpadding="0"><tr>
+<td width="50%" valign="top" style="padding-right:14px;">
+
+<h3 style="color:#555555;">How It Works</h3>
+<p>CommStat continuously monitors the JS8Call live feed and builds a roster of
+callsigns that have been recently heard on the air. This dialog lets you pick a
+destination from that roster and send a point-to-point JS8 directed message
+&mdash; no typing of callsigns required.</p>
+<p>Callsigns are removed from the roster if they have not been heard in the past
+<b>{CONTACTS_RETENTION_HOURS} hours</b>.</p>
+
+<h3 style="color:#555555;">Target &amp; Relay</h3>
+<p><b>Target</b> &mdash; the callsign you want to reach.</p>
+<p><b>Relay</b> &mdash; <i>optional.</i> A station that has recently been heard
+hearing your Target. Pick a Relay when you can't reach the Target directly
+&mdash; CommStat builds the standard JS8 relay payload
+(<i>RELAY&gt; TARGET MSG ...</i>) for you. Leave Relay blank to send a
+non-relayed transmission straight to the Target.</p>
+<p><b>{NO_RELAY_LABEL}</b> &mdash; appears in the Relay list (in bold) whenever
+the Target itself has been heard directly. Selecting it has the same effect as
+leaving Relay blank &mdash; a direct transmission to the Target.</p>
+<p>Both dropdowns are <b>editable</b> &mdash; type a callsign manually when the
+station you want isn't in the roster yet.</p>
+
+<h3 style="color:#555555;">Refresh</h3>
+<p>Re-queries the contacts roster at the current rig frequency and rebuilds the
+Target dropdown. Use it to pick up callsigns that have come on the air since you
+opened this dialog. The Relay dropdown is cleared so you re-pick a relay after
+the Target.</p>
+
+</td>
+<td width="50%" valign="top" style="padding-left:14px;">
+
+<h3 style="color:#555555;">Signal Reports (SNR)</h3>
+<p>The number next to each Relay entry is the SNR at which the Relay reported
+hearing the Target &mdash; higher is better. An SNR of
+<b>{UNKNOWN_SNR_SENTINEL:+d}</b> is a placeholder meaning the SNR is unknown.
+This happens when the roster row came from a HEARING report (e.g.,
+<i>W3BFO: KC1OSZ HEARING K4KBT NY5V K2DHS</i>), which lists stations but
+carries no signal numbers.</p>
+
+<h3 style="color:#555555;">Mode</h3>
+<table cellspacing="2" cellpadding="2">
+<tr><td><b>Slow</b></td><td>&nbsp;&nbsp;8 WPM</td></tr>
+<tr><td><b>Normal</b></td><td>&nbsp;&nbsp;16 WPM</td></tr>
+<tr><td><b>Fast</b></td><td>&nbsp;&nbsp;24 WPM</td></tr>
+<tr><td><b>Turbo</b></td><td>&nbsp;&nbsp;40 WPM</td></tr>
+<tr><td><b>Ultra</b></td><td>&nbsp;&nbsp;60 WPM&nbsp;&nbsp;<b>(Use only for JS8Call 3.0.1 or greater)</b></td></tr>
+</table>
+<p>Changing Mode here also re-tunes the selected rig.</p>
+
+<h3 style="color:#555555;">Tips</h3>
+<ul>
+<li>The Rig dropdown only lists radios that are currently connected &mdash;
+    <i>INTERNET ONLY</i> is intentionally excluded.</li>
+<li>Frequency is read live from the rig and is read-only here; change it in
+    JS8Call if you need a different band.</li>
+<li>Messages are capped at {MAX_MESSAGE_LENGTH} characters; non-printable
+    characters are stripped on transmit.</li>
+<li><b>Clear</b> wipes only the message body &mdash; Rig, Mode, Target, and
+    Relay are preserved so you can fire off several messages in a row.</li>
+</ul>
+
+</td></tr></table>
+</div>
+"""
+
 
 
 class _UpperCaseLineEdit(QtWidgets.QLineEdit):
@@ -800,149 +876,7 @@ class JS8DirectMessageDialog(QDialog):
 
     def _on_help_clicked(self) -> None:
         """Show a styled help dialog explaining how JS8 Direct Message works."""
-        dlg = QDialog(self)
-        apply_standard_dialog_chrome(dlg, "JS8 Direct Message Help")
-        dlg.setFixedWidth(880)
-
-        dlg.setStyleSheet(
-            f"QDialog {{ background-color:{_PANEL_BG}; }}"
-            f"QLabel  {{ color:{_PANEL_FG}; background-color:transparent; font-size:13px; }}"
-        )
-
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(10)
-
-        title = QLabel("JS8 Direct Message Help")
-        title.setAlignment(Qt.AlignCenter)
-        title.setFont(QtGui.QFont("Roboto Slab", -1, QtGui.QFont.Black))
-        title.setFixedHeight(36)
-        title.setStyleSheet(
-            f"QLabel {{ background-color:{_PROG_BG}; color:{_PROG_FG};"
-            f" font-family:'Roboto Slab'; font-size:16px; font-weight:900;"
-            f" padding-top:9px; padding-bottom:9px; }}"
-        )
-        layout.addWidget(title)
-
-        def _section_header(text: str) -> QLabel:
-            lbl = QLabel(text)
-            lbl.setStyleSheet(
-                "QLabel { background-color:transparent; color:#000000;"
-                " font-family:Roboto; font-size:13px; font-weight:bold;"
-                " padding-bottom:2px; border-bottom:1px solid #999999; }"
-            )
-            return lbl
-
-        def _body_label(html: str) -> QLabel:
-            lbl = QLabel(html)
-            lbl.setTextFormat(Qt.RichText)
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet(
-                "QLabel { background-color:transparent; color:#000000;"
-                " font-family:Roboto; font-size:13px; padding-left:8px; }"
-            )
-            return lbl
-
-        # Two-column body layout
-        cols = QHBoxLayout()
-        cols.setSpacing(20)
-
-        left = QVBoxLayout()
-        left.setSpacing(10)
-        right = QVBoxLayout()
-        right.setSpacing(10)
-
-        # Left column: How It Works · Target & Relay · Refresh
-        left.addWidget(_section_header("How It Works"))
-        left.addWidget(_body_label(
-            "CommStat continuously monitors the JS8Call live feed and builds a "
-            "roster of callsigns that have been recently heard on the air. "
-            "This dialog lets you pick a destination from that roster and send "
-            "a point-to-point JS8 directed message &mdash; no typing of "
-            "callsigns required.<br>"
-            f"Callsigns are removed from the roster if they have not been "
-            f"heard in the past <b>{CONTACTS_RETENTION_HOURS} hours</b>."
-        ))
-
-        left.addWidget(_section_header("Target & Relay"))
-        left.addWidget(_body_label(
-            "<b>Target</b> &mdash; the callsign you want to reach.<br>"
-            "<b>Relay</b> &mdash; <i>optional.</i> A station that has "
-            "recently been heard hearing your Target. Pick a Relay when "
-            "you can't reach the Target directly &mdash; CommStat builds "
-            "the standard JS8 relay payload (<i>RELAY&gt; TARGET MSG "
-            "...</i>) for you. Leave Relay blank to send a non-relayed "
-            "transmission straight to the Target.<br>"
-            f"<b>{NO_RELAY_LABEL}</b> &mdash; appears in the "
-            "Relay list (in bold) whenever the Target itself has been heard "
-            "directly. Selecting it has the same effect as leaving Relay "
-            "blank &mdash; a direct transmission to the Target.<br>"
-            "Both dropdowns are <b>editable</b> &mdash; type a callsign "
-            "manually when the station you want isn't in the roster yet."
-        ))
-
-        left.addWidget(_section_header("Refresh"))
-        left.addWidget(_body_label(
-            "Re-queries the contacts roster at the current rig frequency and "
-            "rebuilds the Target dropdown. Use it to pick up callsigns that "
-            "have come on the air since you opened this dialog. The Relay "
-            "dropdown is cleared so you re-pick a relay after the Target."
-        ))
-        left.addStretch()
-
-        # Right column: Signal Reports · Mode · Tips
-        right.addWidget(_section_header("Signal Reports (SNR)"))
-        right.addWidget(_body_label(
-            "The number next to each Relay entry is the SNR at which the "
-            "Relay reported hearing the Target &mdash; higher is better. "
-            f"An SNR of <b>{UNKNOWN_SNR_SENTINEL:+d}</b> is a placeholder "
-            "meaning the SNR is unknown. This happens when the roster row "
-            "came from a HEARING report (e.g., <i>W3BFO: KC1OSZ HEARING "
-            "K4KBT NY5V K2DHS</i>), which lists stations but carries no "
-            "signal numbers."
-        ))
-
-        right.addWidget(_section_header("Mode"))
-        right.addWidget(_body_label(
-            "<table cellspacing='2' cellpadding='1'>"
-            "<tr><td><b>Slow</b></td><td>&nbsp;&nbsp;8 WPM</td></tr>"
-            "<tr><td><b>Normal</b></td><td>&nbsp;&nbsp;16 WPM</td></tr>"
-            "<tr><td><b>Fast</b></td><td>&nbsp;&nbsp;24 WPM</td></tr>"
-            "<tr><td><b>Turbo</b></td><td>&nbsp;&nbsp;40 WPM</td></tr>"
-            "<tr><td><b>Ultra</b></td><td>&nbsp;&nbsp;60 WPM&nbsp;&nbsp;<b>(Use only for JS8Call 3.0.1)</b></td></tr>"
-            "</table>"
-            "Changing Mode here also re-tunes the selected rig."
-        ))
-
-        right.addWidget(_section_header("Tips"))
-        right.addWidget(_body_label(
-            "&bull; The Rig dropdown only lists radios that are currently "
-            "connected &mdash; <i>INTERNET ONLY</i>&nbsp;&nbsp;is intentionally excluded.<br>"
-            "&bull; Frequency is read live from the rig and is read-only "
-            "here; change it in JS8Call if you need a different band.<br>"
-            f"&bull; Messages are capped at {MAX_MESSAGE_LENGTH} characters; "
-            "non-printable characters are stripped on transmit.<br>"
-            "&bull; <b>Clear</b> wipes only the message body &mdash; Rig, "
-            "Mode, Target, and Relay are preserved so you can fire off "
-            "several messages in a row."
-        ))
-        right.addStretch()
-
-        cols.addLayout(left, 1)
-        cols.addLayout(right, 1)
-        layout.addLayout(cols)
-
-        layout.addSpacing(4)
-
-        # Close button
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_close = make_button("Close", _COL_CANCEL)
-        btn_close.clicked.connect(dlg.accept)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
-
-        dlg.exec_()
+        show_help_dialog(self, "JS8 Direct Message Help", _HELP_HTML, width=900)
 
     def _on_clear(self) -> None:
         """Clear message body only; preserve rig/mode/target/relay."""
