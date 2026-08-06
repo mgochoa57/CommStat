@@ -2893,7 +2893,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 " border: none; border-radius: 4px; font-weight: bold; }"
                 " QPushButton:hover { background-color: #218838; }"
             )
-            self.network_toggle_btn.setToolTip("Online Mode — click to go Off-Grid (disables all internet features)")
         elif netguard.get_user_enabled():
             # User hasn't forced Off-Grid — this is real connectivity loss.
             self.network_toggle_btn.setText("\U0001F4F5  OFF-GRID")
@@ -2902,7 +2901,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 " border: none; border-radius: 4px; font-weight: bold; }"
                 " QPushButton:hover { background-color: #8a2a2a; }"
             )
-            self.network_toggle_btn.setToolTip("No internet detected — will reconnect automatically. Click to force Off-Grid Mode.")
         else:
             self.network_toggle_btn.setText("\U0001F4F5  OFF-GRID")
             self.network_toggle_btn.setStyleSheet(
@@ -2910,7 +2908,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 " border: none; border-radius: 4px; font-weight: bold; }"
                 " QPushButton:hover { background-color: #444444; }"
             )
-            self.network_toggle_btn.setToolTip("Off-Grid Mode — click to go back Online")
 
     def _on_netguard_state_changed(self, online: bool) -> None:
         """netguard listener: keep the header switch in sync whenever the
@@ -3070,15 +3067,21 @@ class MainWindow(QtWidgets.QMainWindow):
         _fix_plain_menu_indent for menus with no checkable items at all,
         which get none of that automatic inset and need an explicit one).
 
-        Windows was already confirmed to look correct with the plain,
-        original rule (no indicator quirks reported there), so it keeps
-        that simpler behavior untouched rather than inheriting Mac-specific
-        tuning that hasn't been verified on that platform.
+        Windows has no such automatic inset: plain items honor the item
+        padding directly, but QMenu::indicator is laid out from the item's
+        left edge and ignores that padding, so checkboxes render flush
+        against the frame while text sits 12px in. Giving the indicator a
+        matching left margin fixes it — margin (unlike 'left', which only
+        offsets the drawn box) also reserves the space, so the checkable
+        rows' own text still clears the checkbox instead of colliding
+        with it.
         """
         menu_bg = self.config.get_color('menu_background')
         menu_fg = self.config.get_color('menu_foreground')
         panel_bg = self.config.get_color('module_background')
         panel_fg = self.config.get_color('module_foreground')
+        # Extra declarations folded into the shared QMenu::indicator rule.
+        indicator_rule = ""
         if sys.platform == "win32":
             item_rule = """
             QMenu::item {
@@ -3088,6 +3091,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 background-color: transparent;
             }
             """
+            # Match QMenu::item's 12px left padding (see docstring).
+            indicator_rule = "margin-left: 12px;"
         else:
             item_rule = """
             QMenu::item {
@@ -3139,6 +3144,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QMenu::indicator {{
                 width: 12px;
                 height: 12px;
+                {indicator_rule}
                 background-color: white;
                 border: 1px solid #7f7f7f;
                 border-radius: 2px;
@@ -3944,7 +3950,7 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {fill}; color: {fg};"
                 " border: none; border-radius: 4px;"
-                " font-family: Roboto; font-weight: bold; font-size: 12px; }}"
+                " font-family: Roboto; font-weight: bold; font-size: 12px; }"
             )
         for lbl in self._cf_conj_labels:
             lbl.setText(self._custom_filter_mode.upper())

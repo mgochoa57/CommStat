@@ -298,7 +298,7 @@ class VideoDialog(QDialog):
             no_inet.setFixedHeight(36)
             no_inet.setStyleSheet(
                 f"QLabel {{ background-color:{_PROG_BG}; color:{_PROG_FG};"
-                " font-size:16px; padding-top:9px; padding-bottom:9px; }}"
+                " font-size:16px; padding-top:9px; padding-bottom:9px; }"
             )
             no_inet_row = QHBoxLayout()
             no_inet_row.setSpacing(8)
