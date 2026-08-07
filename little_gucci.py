@@ -151,6 +151,12 @@ _CONTACTS_HEARING_PATTERN = re.compile(
 )
 _CONTACTS_HEARING_DEFAULT_SNR = -99
 
+# Group target that is always accepted for alerts and messages, whether or not
+# the operator has it in their groups table — it's the network-wide channel
+# every CommStat station is expected to receive. Videos are NOT exempt; they
+# keep their own membership + "Save all Videos" rule.
+_ALWAYS_SAVE_GROUP = "COMMSTAT"
+
 # Solar/radio image dialogs: (menu_label, image_url, link_html, loading_text, error_prefix)
 SOLAR_IMAGE_DIALOGS = [
     ("Band Conditions", "https://www.hamqsl.com/solar101pic.php",
@@ -8487,9 +8493,11 @@ window.commstatBouncePin = function(srid) {
                 return ("", None)
         else:
             # @GROUP — only save if we're a member of that group (active or not),
-            # unless "Save all Alerts" is enabled, which imports every group alert.
-            if not self.config.get_save_all_alerts():
-                group_name = alert_target[1:].upper()
+            # unless "Save all Alerts" is enabled, which imports every group alert,
+            # or the target is the always-accepted network-wide group.
+            group_name = alert_target[1:].upper()
+            if (not self.config.get_save_all_alerts()
+                    and group_name != _ALWAYS_SAVE_GROUP):
                 all_groups = self.db.get_all_groups()
                 if group_name not in all_groups:
                     return ("", None)
@@ -8683,9 +8691,11 @@ window.commstatBouncePin = function(srid) {
         # Check if message is to a group we're in or to one of our callsigns
         if msg_target.startswith("@"):
             # Group message - only save if we're a member of that group, unless
-            # "Save all Messages" is enabled, which imports every group message.
-            if not self.config.get_save_all_messages():
-                group_name = msg_target[1:].upper()  # Remove @ and normalize
+            # "Save all Messages" is enabled, which imports every group message,
+            # or the target is the always-accepted network-wide group.
+            group_name = msg_target[1:].upper()  # Remove @ and normalize
+            if (not self.config.get_save_all_messages()
+                    and group_name != _ALWAYS_SAVE_GROUP):
                 all_groups = self.db.get_all_groups()
                 if group_name not in all_groups:
                     # Skip messages to groups we're not in
@@ -8790,9 +8800,11 @@ window.commstatBouncePin = function(srid) {
 
         # Save criteria — same policy as _parse_message
         if msg_target.startswith("@"):
-            # Group message — save if we're a member, unless "Save all Messages" is on
-            if not self.config.get_save_all_messages():
-                group_name = msg_target[1:].upper()
+            # Group message — save if we're a member, unless "Save all Messages"
+            # is on or the target is the always-accepted network-wide group
+            group_name = msg_target[1:].upper()
+            if (not self.config.get_save_all_messages()
+                    and group_name != _ALWAYS_SAVE_GROUP):
                 if group_name not in self.db.get_all_groups():
                     return ("", None)
         else:
@@ -9033,10 +9045,14 @@ window.commstatBouncePin = function(srid) {
             user_callsign, _, __ = self.db.get_user_settings()
         is_to_user = to_call.split("/")[0].upper() == user_callsign.upper() if user_callsign else False
 
-        # Group check: groups accepted only if in our groups list
+        # Group check: groups accepted if in our groups list, plus the
+        # always-accepted network-wide group (treated as if we were a member,
+        # so its traffic reaches the per-type parsers below — each of which
+        # still applies its own save rule).
         if to_call.startswith("@"):
             group_name = to_call[1:].upper()
-            is_to_group = group_name in self.db.get_all_groups()
+            is_to_group = (group_name in self.db.get_all_groups()
+                           or group_name == _ALWAYS_SAVE_GROUP)
         else:
             is_to_group = False
 
