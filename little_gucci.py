@@ -5335,10 +5335,20 @@ class MainWindow(QtWidgets.QMainWindow):
         Args:
             data_types: Set of data types to refresh ('statrep', 'alert', 'message', 'video')
         """
+        # Only one thing can own the map pane. Alerts outrank videos: when both
+        # arrive on the same heartbeat the pane goes to Alerts and the video is
+        # left to the orange Videos button.
+        if 'alert' in data_types:
+            take_pane = self._trigger_show_alerts
+        elif 'video' in data_types:
+            take_pane = self._trigger_show_videos
+        else:
+            take_pane = None
+
         if 'statrep' in data_types:
             self._load_statrep_data()
-            alert_after_map = self._trigger_show_alerts if 'alert' in data_types else None
-            self._save_map_position(callback=lambda: self._load_map(callback=alert_after_map))
+            # Let the map finish regenerating before anything takes the pane.
+            self._save_map_position(callback=lambda: self._load_map(callback=take_pane))
 
         if 'message' in data_types:
             self._load_message_data()
@@ -5350,6 +5360,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if 'video' in data_types:
             self._update_video_button_indicator()
+            if 'alert' not in data_types and 'statrep' not in data_types:
+                self._trigger_show_videos()
 
     @QtCore.pyqtSlot(int)
     def _show_program_update_notification(self, new_build: int) -> None:
@@ -7616,6 +7628,17 @@ window.commstatBouncePin = function(srid) {
         """Trigger Show Alerts mode when a new alert is received."""
         self._set_map_view_mode("alerts")
 
+    def _trigger_show_videos(self) -> None:
+        """Trigger Videos mode when a new video is received.
+
+        No-op while Videos is already the active view: alerts are static text
+        so re-entering is harmless, but restarting playback at the newest row
+        would yank a video the operator is part-way through.
+        """
+        if getattr(self, '_current_view_mode', '') == "videos":
+            return
+        self._set_map_view_mode("videos")
+
     def _get_filtered_groups(self) -> tuple:
         """Get groups list and show_all flag based on current filter settings.
 
@@ -8136,6 +8159,9 @@ window.commstatBouncePin = function(srid) {
                 self._load_message_data()
             elif data_type == "alert":
                 self._trigger_show_alerts()
+            elif data_type == "video":
+                self._update_video_button_indicator()
+                self._trigger_show_videos()
 
         # Handle RX.ACTIVITY messages (band activity for live feed)
         elif msg_type == "RX.ACTIVITY":
@@ -9026,7 +9052,7 @@ window.commstatBouncePin = function(srid) {
             utc: UTC timestamp string.
 
         Returns:
-            "statrep", "message", "alert", or empty string
+            "statrep", "message", "alert", "video", or empty string
         """
         # Preprocess message value
         value = self._preprocess_message_value(value, from_call)
