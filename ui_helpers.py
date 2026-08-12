@@ -82,6 +82,84 @@ def confirm(parent, title: str, text: str,
     return box.clickedButton() is yes_btn
 
 
+# ── Text prompt dialog ─────────────────────────────────────────────────────────
+
+def prompt_text(parent, title: str, label: str, default: str = "",
+                max_len: int = 30, ok_label: str = "Save",
+                panel_bg: str = None, prog_bg: str = None,
+                prog_fg: str = None):
+    """Ask for a single line of text in a styled dialog. Returns the stripped
+    text, or None if the user cancelled or left it empty.
+
+    Same chrome as every other CommStat dialog - Roboto Slab title strip in the
+    program colors over a panel-colored body - so a prompt never falls back to
+    Qt's unstyled QInputDialog.
+
+    panel_bg / prog_bg / prog_fg: optional live theme colors; callers with a
+    running ConfigManager should pass them so the prompt tracks a theme change.
+    """
+    panel_bg = panel_bg or DEFAULT_COLORS.get("module_background", "#E4E4E4")
+    prog_bg = prog_bg or DEFAULT_COLORS.get("program_background", "#A52A2A")
+    prog_fg = prog_fg or DEFAULT_COLORS.get("program_foreground", "#FFFFFF")
+    panel_fg = DEFAULT_COLORS.get("module_foreground", "#000000")
+
+    dlg = QDialog(parent)
+    # Width is fixed, height is left to the layout: macOS and most Linux desktops
+    # render the same 13px labels taller than Windows does, and a hardcoded
+    # height would clip the button row there.
+    apply_standard_dialog_chrome(dlg, title)
+    dlg.setFixedWidth(380)
+    dlg.setStyleSheet(
+        f"QDialog {{ background-color:{panel_bg}; color:{panel_fg}; }}"
+        f"QLabel {{ font-size:13px; color:{panel_fg}; }}"
+    )
+
+    body = QVBoxLayout(dlg)
+    body.setContentsMargins(15, 15, 15, 15)
+    body.setSpacing(10)
+
+    title_lbl = QLabel(title)
+    title_lbl.setAlignment(Qt.AlignCenter)
+    title_lbl.setStyleSheet(
+        "font-family: 'Roboto Slab'; font-size: 16px; font-weight: 900;"
+        f"background-color: {prog_bg}; color: {prog_fg}; padding: 9px 0px;"
+    )
+    body.addWidget(title_lbl)
+
+    field_lbl = QLabel(label)
+    field_lbl.setFont(label_font())
+    body.addWidget(field_lbl)
+
+    field = make_input(default=default, max_len=max_len)
+    body.addWidget(field)
+    body.addSpacing(4)
+
+    result = {"text": None}
+
+    def _accept():
+        text = field.text().strip()
+        if not text:
+            return          # Nothing to save; leave the dialog open.
+        result["text"] = text
+        dlg.accept()
+
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(8)
+    btn_row.addStretch()
+    ok_btn = make_button(ok_label, COLOR_BTN_GREEN, 80)
+    ok_btn.clicked.connect(_accept)
+    cancel_btn = make_button("Cancel", COLOR_BTN_CLOSE, 80)
+    cancel_btn.clicked.connect(dlg.reject)
+    btn_row.addWidget(ok_btn)
+    btn_row.addWidget(cancel_btn)
+    body.addLayout(btn_row)
+
+    field.returnPressed.connect(_accept)
+    field.setFocus()
+    dlg.exec_()
+    return result["text"]
+
+
 # ── Input ──────────────────────────────────────────────────────────────────────
 
 def make_input(placeholder: str = "", default: str = "", max_len: int = 0) -> QLineEdit:

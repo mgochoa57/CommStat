@@ -32,17 +32,18 @@ _TITLE_FG = DEFAULT_COLORS.get("title_bar_foreground", "#FFFFFF")
 _DATA_BG  = DEFAULT_COLORS.get("data_background",      "#F8F6F4")
 _DATA_FG  = DEFAULT_COLORS.get("data_foreground",      "#000000")
 
-_COL_ADD    = "#28a745"
-_COL_EDIT   = "#007bff"
-_COL_DELETE = "#dc3545"
-_COL_CLOSE  = "#555555"
-_COL_SAVE   = "#28a745"
-_COL_CANCEL = "#555555"
+_COL_ADD     = "#28a745"
+_COL_EDIT    = "#007bff"
+_COL_DELETE  = "#dc3545"
+_COL_MEMBERS = "#6f42c1"
+_COL_CLOSE   = "#555555"
+_COL_SAVE    = "#28a745"
+_COL_CANCEL  = "#555555"
 
-_WIN_W = 520
+_WIN_W = 610
 _WIN_H = 400
 
-_TABLE_COLS = ["Group Name", "Comment"]
+_TABLE_COLS = ["Group Name", "Members", "Comment"]
 
 
 # ── Dialog ─────────────────────────────────────────────────────────────────────
@@ -103,7 +104,8 @@ class GroupsDialog(QDialog):
 
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
 
         self.table.setStyleSheet(
             f"QTableWidget {{ background-color:{_DATA_BG}; alternate-background-color:{_DATA_BG};"
@@ -132,15 +134,17 @@ class GroupsDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        self.btn_add    = make_button("Add",    _COL_ADD,    80)
-        self.btn_edit   = make_button("Edit",   _COL_EDIT,   80)
-        self.btn_delete = make_button("Delete", _COL_DELETE, 80)
-        self.btn_save   = make_button("Save",   _COL_SAVE,   80)
-        self.btn_cancel = make_button("Cancel", _COL_CANCEL, 80)
-        self.btn_close  = make_button("Close",  _COL_CLOSE,  80)
+        self.btn_add     = make_button("Add",     _COL_ADD,     80)
+        self.btn_edit    = make_button("Edit",    _COL_EDIT,    80)
+        self.btn_delete  = make_button("Delete",  _COL_DELETE,  80)
+        self.btn_members = make_button("Members", _COL_MEMBERS, 80)
+        self.btn_save    = make_button("Save",    _COL_SAVE,    80)
+        self.btn_cancel  = make_button("Cancel",  _COL_CANCEL,  80)
+        self.btn_close   = make_button("Close",   _COL_CLOSE,   80)
 
         self.btn_edit.setEnabled(False)
         self.btn_delete.setEnabled(False)
+        self.btn_members.setEnabled(False)
         self.btn_save.setVisible(False)
         self.btn_cancel.setVisible(False)
         self.btn_save.setEnabled(False)
@@ -148,6 +152,7 @@ class GroupsDialog(QDialog):
         self.btn_add.clicked.connect(self._on_add)
         self.btn_edit.clicked.connect(self._on_edit)
         self.btn_delete.clicked.connect(self._on_delete)
+        self.btn_members.clicked.connect(self._on_members)
         self.btn_save.clicked.connect(lambda: self._exit_edit_mode(save=True))
         self.btn_cancel.clicked.connect(lambda: self._exit_edit_mode(save=False))
         self.btn_close.clicked.connect(self.accept)
@@ -155,6 +160,7 @@ class GroupsDialog(QDialog):
         btn_row.addWidget(self.btn_add)
         btn_row.addWidget(self.btn_edit)
         btn_row.addWidget(self.btn_delete)
+        btn_row.addWidget(self.btn_members)
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(self.btn_cancel)
         btn_row.addStretch()
@@ -168,16 +174,20 @@ class GroupsDialog(QDialog):
         self._edit_row = -1
         self._edit_name = ""
         groups = self.db.get_all_groups_details()
+        counts = self.db.get_group_member_counts()
         self.table.setRowCount(0)
         mono = QtGui.QFont("Kode Mono")
 
         for g in groups:
             row = self.table.rowCount()
             self.table.insertRow(row)
-            for col, val in enumerate([g["name"], g["comment"]]):
+            values = [g["name"], str(counts.get(g["name"], 0)), g["comment"]]
+            for col, val in enumerate(values):
                 item = QTableWidgetItem(val)
                 item.setFont(mono)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                if col == 1:
+                    item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row, col, item)
 
         self._on_selection_changed()
@@ -191,6 +201,7 @@ class GroupsDialog(QDialog):
         self.btn_add.setEnabled(True)
         self.btn_edit.setEnabled(has_sel)
         self.btn_delete.setEnabled(has_sel)
+        self.btn_members.setEnabled(has_sel)
 
     # ── Inline edit ────────────────────────────────────────────────────────────
 
@@ -204,7 +215,7 @@ class GroupsDialog(QDialog):
             comment_val = ""
         else:
             name_item = self.table.item(row, 0)
-            comment_item = self.table.item(row, 1)
+            comment_item = self.table.item(row, 2)
             name_val = name_item.text() if name_item else ""
             comment_val = comment_item.text() if comment_item else ""
             self._edit_name = name_val
@@ -249,13 +260,14 @@ class GroupsDialog(QDialog):
         self.table.setColumnWidth(0, _name_w + 16)
 
         self.table.setCellWidget(row, 0, _wrap_fixed(self._iw_name, _name_w))
-        self.table.setCellWidget(row, 1, self._iw_comment)
+        self.table.setCellWidget(row, 2, self._iw_comment)
         self.table.setRowHeight(row, 42)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
 
         self.btn_add.setVisible(False)
         self.btn_edit.setVisible(False)
         self.btn_delete.setVisible(False)
+        self.btn_members.setVisible(False)
         self.btn_save.setVisible(True)
         self.btn_cancel.setVisible(True)
         self.btn_close.setEnabled(False)
@@ -302,7 +314,7 @@ class GroupsDialog(QDialog):
                     QMessageBox.critical(self, "Error", "Could not update group.")
                     return
 
-        for col in range(2):
+        for col in range(len(_TABLE_COLS)):
             self.table.removeCellWidget(row, col)
 
         self._iw_name = self._iw_comment = None
@@ -318,6 +330,7 @@ class GroupsDialog(QDialog):
         self.btn_add.setVisible(True)
         self.btn_edit.setVisible(True)
         self.btn_delete.setVisible(True)
+        self.btn_members.setVisible(True)
         self.btn_save.setVisible(False)
         self.btn_cancel.setVisible(False)
         self.btn_close.setEnabled(True)
@@ -357,6 +370,26 @@ class GroupsDialog(QDialog):
         if not self.db.remove_group(name):
             QMessageBox.critical(self, "Error", "Could not delete group.")
             return
+        self._load()
+
+    def _on_members(self) -> None:
+        if self._in_edit_mode:
+            return
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        name_item = self.table.item(row, 0)
+        name = name_item.text() if name_item else ""
+        if not name:
+            return
+        group_id = self.db.get_group_id(name)
+        if group_id is None:
+            QMessageBox.critical(self, "Error", "Could not resolve group.")
+            return
+        # Deferred import keeps this module importable standalone.
+        from group_members import GroupMembersDialog
+        GroupMembersDialog(self.db, group_id, name, self).exec_()
+        # Refresh the Members count column.
         self._load()
 
 

@@ -157,6 +157,11 @@ _CONTACTS_HEARING_DEFAULT_SNR = -99
 # keep their own membership + "Save all Videos" rule.
 _ALWAYS_SAVE_GROUP = "COMMSTAT"
 
+# The map-pane view modes that show an actual region map. New alerts/videos are
+# only allowed to take the pane while one of these is current — see
+# MainWindow._map_pane_is_free().
+_MAP_REGION_MODES = ("us", "eu", "mideast", "seasia", "world")
+
 # Solar/radio image dialogs: (menu_label, image_url, link_html, loading_text, error_prefix)
 SOLAR_IMAGE_DIALOGS = [
     ("Band Conditions", "https://www.hamqsl.com/solar101pic.php",
@@ -529,6 +534,24 @@ def _strip_cs_suffix(callsign: str) -> str:
     if not callsign:
         return ""
     return callsign.split("/", 1)[0].upper()
+
+
+def base_callsign(callsign: str) -> str:
+    """
+    Return the longest '/'-delimited token, uppercased — used for duplicate matching.
+
+    N0DDK/P -> N0DDK, KH6/N0DDK -> N0DDK. The stored from_callsign keeps its suffix
+    (that's what the operator transmitted), so duplicate detection has to compare the
+    base form: the same record can arrive as N0DDK/P over RF and N0DDK from the
+    commsrvr, and both must resolve to one row.
+
+    Matches the convention already used by qrz_client.QRZClient.lookup. Kept separate
+    from _strip_cs_suffix(), which the contacts-capture path relies on for its
+    everything-before-the-first-slash behavior.
+    """
+    if not callsign:
+        return ""
+    return max(callsign.upper().split("/"), key=len)
 
 
 def parse_contacts_observation(value: str) -> Optional[Tuple[str, int]]:
@@ -989,6 +1012,13 @@ class CustomWebEnginePage(QWebEnginePage):
                 self.parent_widget._on_map_filter_set(state)
             return False
 
+        # Handle member pin clicks: commstat://member-pin/{callsign}
+        if url.host() == "member-pin":
+            callsign = url.path().lstrip("/")
+            if hasattr(self.parent_widget, '_on_member_pin_clicked'):
+                self.parent_widget._on_member_pin_clicked(callsign)
+            return False
+
         # Open USGS earthquake event links in the user's browser.
         if url.scheme() in ("http", "https") and "earthquake.usgs.gov" in url.host():
             if hasattr(self.parent_widget, '_open_external_link'):
@@ -1111,6 +1141,7 @@ class ConfigManager:
                 'earthquake_min_mag': 2.5,
                 'earthquake_region': 'Worldwide',
                 'earthquake_refresh': 10,
+                'member_pin_groups': '',
                 'font_family': 'Segoe UI',
                 'font_size': 9,
             }
@@ -1152,6 +1183,7 @@ class ConfigManager:
                 'earthquake_min_mag':     config.getfloat("DIRECTEDCONFIG", "earthquake_min_mag",     fallback=2.5),
                 'earthquake_region':      config.get("DIRECTEDCONFIG", "earthquake_region",      fallback="Worldwide"),
                 'earthquake_refresh':     config.getint("DIRECTEDCONFIG", "earthquake_refresh",     fallback=10),
+                'member_pin_groups':      config.get("DIRECTEDCONFIG", "member_pin_groups",      fallback=""),
                 'map_theme':              config.get("DIRECTEDCONFIG", "map_theme",              fallback='dark'),
             }
         else:
@@ -1172,6 +1204,7 @@ class ConfigManager:
                 'earthquake_min_mag': 2.5,
                 'earthquake_region': 'Worldwide',
                 'earthquake_refresh': 10,
+                'member_pin_groups': '',
                 'map_theme': 'dark',
             }
 
@@ -1388,6 +1421,14 @@ class ConfigManager:
 
     def set_earthquake_min_mag(self, value: float) -> None:
         self._save_setting('earthquake_min_mag', value)
+
+    def get_member_pin_groups(self) -> List[str]:
+        """Group names whose member pins are shown on the map."""
+        raw = self.directed_config.get('member_pin_groups', '')
+        return [g for g in raw.split(',') if g]
+
+    def set_member_pin_groups(self, groups: List[str]) -> None:
+        self._save_setting('member_pin_groups', ','.join(groups))
 
     def get_earthquake_region(self) -> str:
         return self.directed_config.get('earthquake_region', 'Worldwide')
@@ -2031,6 +2072,16 @@ class DatabaseManager:
     def remove_group(self, group_name: str) -> bool:
         """Remove a group. Returns True if successful."""
         def op(cursor, conn):
+            try:
+                cursor.execute(
+                    "DELETE FROM groupMembers WHERE group_id = "
+                    "(SELECT id FROM groups WHERE name = ?)",
+                    (group_name.upper(),)
+                )
+            except sqlite3.Error:
+                # groupMembers table may not exist yet; the group delete must
+                # keep working regardless.
+                pass
             cursor.execute("DELETE FROM groups WHERE name = ?", (group_name.upper(),))
             conn.commit()
             return cursor.rowcount > 0
@@ -2042,6 +2093,127 @@ class DatabaseManager:
             cursor.execute("SELECT COUNT(*) FROM groups")
             return cursor.fetchone()[0]
         return self._execute(op, 0)
+
+    def get_group_id(self, group_name: str) -> Optional[int]:
+        """Get a group's id by name, or None if not found."""
+        def op(cursor, conn):
+            cursor.execute("SELECT id FROM groups WHERE name = ?", (group_name.strip().upper(),))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        return self._execute(op, None)
+
+    def get_group_member_counts(self) -> Dict[str, int]:
+        """Get member counts keyed by group name. Groups without members count 0."""
+        def op(cursor, conn):
+            cursor.execute(
+                "SELECT g.name, COUNT(gm.id) FROM groups g "
+                "LEFT JOIN groupMembers gm ON gm.group_id = g.id "
+                "GROUP BY g.id"
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        return self._execute(op, {})
+
+    def get_group_members(self, group_id: int) -> List[Dict]:
+        """Get a group's members joined with their qrz contact details."""
+        def op(cursor, conn):
+            cursor.execute(
+                "SELECT q.id, q.callsign, q.name, q.city, q.state, q.grid "
+                "FROM groupMembers gm JOIN qrz q ON q.id = gm.member_id "
+                "WHERE gm.group_id = ? ORDER BY q.callsign",
+                (group_id,)
+            )
+            return [
+                {
+                    "id": row[0],
+                    "callsign": row[1] or "",
+                    "name": row[2] or "",
+                    "city": row[3] or "",
+                    "state": row[4] or "",
+                    "grid": row[5] or "",
+                }
+                for row in cursor.fetchall()
+            ]
+        return self._execute(op, [])
+
+    def add_group_member(self, group_id: int, member_id: int) -> bool:
+        """Add a qrz contact to a group. Returns False if already a member."""
+        try:
+            with sqlite3.connect(self.db_path, timeout=10) as connection:
+                cursor = connection.cursor()
+                cursor.execute(
+                    "INSERT INTO groupMembers (group_id, member_id) VALUES (?, ?)",
+                    (group_id, member_id)
+                )
+                connection.commit()
+                return True
+        except sqlite3.IntegrityError:
+            # Already a member
+            return False
+        except sqlite3.Error as error:
+            print(f"Database error: {error}")
+            return False
+
+    def remove_group_member(self, group_id: int, member_id: int) -> bool:
+        """Remove a qrz contact from a group. The qrz row itself is untouched."""
+        def op(cursor, conn):
+            cursor.execute(
+                "DELETE FROM groupMembers WHERE group_id = ? AND member_id = ?",
+                (group_id, member_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        return self._execute(op, False)
+
+    def get_qrz_id(self, callsign: str) -> Optional[int]:
+        """Get a qrz row id by callsign, or None if not cached."""
+        def op(cursor, conn):
+            cursor.execute("SELECT id FROM qrz WHERE callsign = ?", (callsign.strip().upper(),))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        return self._execute(op, None)
+
+    def add_qrz_manual(self, callsign: str, name: str = "", city: str = "",
+                       state: str = "", grid: str = "") -> Optional[int]:
+        """Insert a manually entered contact into the qrz table.
+
+        Normalization matches QRZClient._save_to_cache. Returns the row id —
+        the existing row's id if the callsign is already cached.
+        """
+        cs = callsign.strip().upper()
+        if not cs:
+            return None
+        def op(cursor, conn):
+            try:
+                cursor.execute(
+                    "INSERT INTO qrz (callsign, name, city, state, grid) VALUES (?, ?, ?, ?, ?)",
+                    (cs, name.strip().title(), city.strip().title(),
+                     state.strip().upper(), grid.strip())
+                )
+                conn.commit()
+                return cursor.lastrowid
+            except sqlite3.IntegrityError:
+                cursor.execute("SELECT id FROM qrz WHERE callsign = ?", (cs,))
+                row = cursor.fetchone()
+                return row[0] if row else None
+        return self._execute(op, None)
+
+    def get_member_pins(self, group_names: List[str]) -> List[Tuple]:
+        """Get (callsign, lat, lon, grid) for the members of the named groups,
+        one row per callsign. The joins drop members whose group or qrz
+        contact was deleted."""
+        if not group_names:
+            return []
+        def op(cursor, conn):
+            placeholders = ",".join("?" * len(group_names))
+            cursor.execute(
+                "SELECT DISTINCT q.callsign, q.lat, q.lon, q.grid "
+                "FROM groupMembers gm "
+                "JOIN qrz q ON q.id = gm.member_id "
+                f"JOIN groups g ON g.id = gm.group_id AND g.name IN ({placeholders})",
+                group_names
+            )
+            return cursor.fetchall()
+        return self._execute(op, [])
 
     def get_abbreviations(self) -> Dict[str, str]:
         """Get all abbreviations from database as a dictionary."""
@@ -2129,6 +2301,16 @@ class DatabaseManager:
     def delete_qrz_contact(self, callsign: str) -> bool:
         """Delete a single QRZ cached contact by callsign."""
         def op(cursor, conn):
+            try:
+                cursor.execute(
+                    "DELETE FROM groupMembers WHERE member_id = "
+                    "(SELECT id FROM qrz WHERE callsign = ?)",
+                    (callsign,)
+                )
+            except sqlite3.Error:
+                # groupMembers table may not exist yet; the contact delete must
+                # keep working regardless.
+                pass
             cursor.execute("DELETE FROM qrz WHERE callsign = ?", (callsign,))
             conn.commit()
             return cursor.rowcount > 0
@@ -2164,6 +2346,61 @@ class DatabaseManager:
                     "UPDATE controls SET default_map = ? WHERE id = 1",
                     (region,)
                 )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.OperationalError:
+                return False
+        return self._execute(op, False)
+
+    def get_map_filters(self) -> List[Tuple[str, str, str, str, str, str]]:
+        """All saved Custom Filtering criteria sets, ordered by name.
+
+        Returns (name, from_call, to_call, sr_id, grid, mode) tuples. The
+        OperationalError guard keeps the filter bar usable on a database that
+        predates the map_filters table - same approach as get_default_map.
+        """
+        def op(cursor, conn):
+            try:
+                cursor.execute(
+                    "SELECT name, from_call, to_call, sr_id, grid, mode "
+                    "FROM map_filters ORDER BY name COLLATE NOCASE"
+                )
+                return [
+                    (r[0], r[1] or "", r[2] or "", r[3] or "", r[4] or "", r[5] or "or")
+                    for r in cursor.fetchall()
+                ]
+            except sqlite3.OperationalError:
+                return []
+        return self._execute(op, [])
+
+    def save_map_filter(self, name: str, from_call: str, to_call: str,
+                        sr_id: str, grid: str, mode: str) -> bool:
+        """Insert or replace a saved Custom Filtering criteria set by name."""
+        def op(cursor, conn):
+            try:
+                cursor.execute(
+                    "UPDATE map_filters SET from_call = ?, to_call = ?, sr_id = ?,"
+                    " grid = ?, mode = ? WHERE name = ?",
+                    (from_call, to_call, sr_id, grid, mode, name)
+                )
+                if cursor.rowcount == 0:
+                    cursor.execute(
+                        "INSERT INTO map_filters"
+                        " (name, from_call, to_call, sr_id, grid, mode, date_added)"
+                        " VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+                        (name, from_call, to_call, sr_id, grid, mode)
+                    )
+                conn.commit()
+                return True
+            except sqlite3.OperationalError:
+                return False
+        return self._execute(op, False)
+
+    def delete_map_filter(self, name: str) -> bool:
+        """Delete a saved Custom Filtering criteria set by name."""
+        def op(cursor, conn):
+            try:
+                cursor.execute("DELETE FROM map_filters WHERE name = ?", (name,))
                 conn.commit()
                 return cursor.rowcount > 0
             except sqlite3.OperationalError:
@@ -2824,6 +3061,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Populate the Groups menu and filter menu group checkboxes
         self._populate_groups_menu()
         self._populate_filter_groups_menu()
+        self._populate_member_pins_menu()
 
         # Load initial data
         self._load_statrep_data()
@@ -3364,6 +3602,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_every_group_action.triggered.connect(self._on_toggle_show_every_group)
         self.filter_menu.addAction(self.show_every_group_action)
 
+        # GROUP MEMBER PINS section — one checkbox per group that has members,
+        # inserted dynamically by _populate_member_pins_menu above the Help item.
+        self.filter_menu.addSeparator()
+        member_pins_label = QtWidgets.QAction("Group Member Pins", self)
+        member_pins_label.setEnabled(False)  # Disabled as a section title
+        self.filter_menu.addAction(member_pins_label)
+
+        self.member_pin_group_actions: Dict[str, QtWidgets.QAction] = {}
+
+        self.member_pins_help_action = QtWidgets.QAction("Help", self)
+        self.member_pins_help_action.triggered.connect(self._on_member_pins_help)
+        self.filter_menu.addAction(self.member_pins_help_action)
+
         # Map theme menu
         self.map_theme_menu = _MenuBarMenu("Map", self.menubar)
         self.menubar.addMenu(self.map_theme_menu)
@@ -3484,6 +3735,10 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
         add_section_header(self.tools_menu, "Internet Websites")
+        create_action(
+            self.tools_menu, "Apocalypse Early Warning", "apocalypse_early_warning",
+            lambda checked=False: self._open_external_link("https://ews.kylemcdonald.net/", "Apocalypse Early Warning")
+        )
         create_action(self.tools_menu, "Flock Camera Map", "flock_camera_map", self._on_flock_camera_map)
         create_action(self.tools_menu, "Live Radiation Map", "live_radiation_map", self._on_live_radiation_map)
         for label, key, url in [
@@ -3821,7 +4076,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_custom_filter_bar(self) -> None:
         """Build the Custom Filtering row shown above the StatRep headers
         while Map Filter is "custom". Four comma-separated criteria boxes
-        joined by an AND/OR toggle; hidden in every other filter state."""
+        joined by an AND/OR toggle; hidden in every other filter state.
+        A dropdown on the left recalls criteria sets saved to map_filters."""
+        from ui_helpers import connect_single
+
         self.custom_filter_bar = QtWidgets.QWidget(self.central_widget)
         self.custom_filter_bar.setObjectName("customFilterBar")
         self.custom_filter_bar.setFixedHeight(34)
@@ -3830,17 +4088,25 @@ class MainWindow(QtWidgets.QMainWindow):
         row.setContentsMargins(10, 0, 10, 0)
         row.setSpacing(6)
 
-        self._cf_title_label = QtWidgets.QLabel("CUSTOM FILTERING")
-        row.addWidget(self._cf_title_label)
-        row.addSpacing(18)
+        # Saved-filter picker leads the bar. Item 0 is the placeholder (no
+        # saved filter selected); every other item carries its name as itemData.
+        self._cf_saved: Dict[str, Tuple[str, str, str, str, str]] = {}
+        self._cf_saved_combo = QtWidgets.QComboBox()
+        self._cf_saved_combo.setFixedSize(170, 22)
+        self._cf_saved_combo.setCursor(Qt.PointingHandCursor)
+        self._cf_saved_combo.currentIndexChanged.connect(self._on_saved_filter_selected)
+        row.addWidget(self._cf_saved_combo)
+        row.addSpacing(10)
 
         # Four criteria boxes with the AND/OR conjunction labels between them.
-        # Boxes are wide (150px) because each holds a comma-separated list;
+        # Each box names itself with its placeholder rather than carrying a
+        # separate label - the bar is already near the window's width, and the
+        # placeholder disappears exactly when the typed value makes it redundant.
+        # Boxes are wide (140px) because each holds a comma-separated list;
         # longer lists scroll horizontally within the box.
         # No tooltips here - the rules are documented in the map's Filter > Help.
-        _FIELDS = [("from", "From="), ("to", "To="), ("id", "ID="), ("grid", "Grid=")]
+        _FIELDS = [("from", "From"), ("to", "To"), ("id", "ID"), ("grid", "Grid")]
         self._cf_inputs: Dict[str, QtWidgets.QLineEdit] = {}
-        self._cf_field_labels: List[QtWidgets.QLabel] = []
         self._cf_conj_labels: List[QtWidgets.QLabel] = []
         for idx, (key, label_text) in enumerate(_FIELDS):
             if idx:
@@ -3850,28 +4116,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._cf_conj_labels.append(conj)
                 row.addWidget(conj)
 
-            lbl = QtWidgets.QLabel(label_text)
-            self._cf_field_labels.append(lbl)
-            row.addWidget(lbl)
-
             edit = UpperCaseLineEdit()
-            edit.setFixedSize(150, 22)
-            edit.setPlaceholderText("any")
+            edit.setFixedSize(140, 22)
+            edit.setPlaceholderText(label_text)
             edit.textChanged.connect(lambda _t: self._custom_filter_timer.start())
             self._cf_inputs[key] = edit
             row.addWidget(edit)
 
-        # "Use: AND" / "Use: OR" sit right after the last box so they read as
-        # part of the criteria sentence. Active one is filled.
+        # The AND/OR picker sits right after the last box so the bar still reads
+        # as a sentence, with Save/Delete for the saved-filter list beside it.
         row.addSpacing(14)
-        self._cf_mode_buttons: Dict[str, QtWidgets.QPushButton] = {}
+        self._cf_mode_combo = QtWidgets.QComboBox()
+        self._cf_mode_combo.setFixedSize(76, 22)
+        self._cf_mode_combo.setCursor(Qt.PointingHandCursor)
         for mode in ("and", "or"):
-            btn = QtWidgets.QPushButton(f"Use: {mode.upper()}")
-            btn.setFixedSize(74, 22)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(lambda _c, m=mode: self._on_custom_filter_mode(m))
-            self._cf_mode_buttons[mode] = btn
-            row.addWidget(btn)
+            self._cf_mode_combo.addItem(mode.upper(), mode)
+        self._cf_mode_combo.currentIndexChanged.connect(
+            lambda _i: self._on_custom_filter_mode(self._cf_mode_combo.currentData())
+        )
+        row.addWidget(self._cf_mode_combo)
+
+        # Save / Delete act on the saved-filter dropdown, so they sit with the
+        # criteria rather than with the bar's Help / Close chrome.
+        self._cf_save_btn = QtWidgets.QPushButton("Save")
+        self._cf_delete_btn = QtWidgets.QPushButton("Delete")
+        row.addWidget(self._cf_save_btn)
+        row.addWidget(self._cf_delete_btn)
 
         row.addStretch(1)
 
@@ -3879,16 +4149,24 @@ class MainWindow(QtWidgets.QMainWindow):
         # colors (pink Help, gray Close - see ui_helpers.make_button callers).
         self._cf_help_btn = QtWidgets.QPushButton("Help")
         self._cf_close_btn = QtWidgets.QPushButton("Close")
+        row.addWidget(self._cf_help_btn)
+        row.addWidget(self._cf_close_btn)
+
         self._cf_action_buttons = [
+            (self._cf_save_btn, COLOR_BTN_GREEN),
+            (self._cf_delete_btn, COLOR_BTN_RED),
             (self._cf_help_btn, "#e83e8c"),
             (self._cf_close_btn, "#555555"),
         ]
+        # connect_single: a second click while the name prompt is up would
+        # otherwise stack two dialogs.
+        connect_single(self._cf_save_btn, self._on_save_custom_filter)
+        connect_single(self._cf_delete_btn, self._on_delete_custom_filter)
         self._cf_help_btn.clicked.connect(lambda _c: self._on_map_filter_help())
         self._cf_close_btn.clicked.connect(lambda _c: self._on_map_filter_set("off"))
         for btn, _color in self._cf_action_buttons:
             btn.setFixedSize(60, 22)
             btn.setCursor(Qt.PointingHandCursor)
-            row.addWidget(btn)
 
         # Re-filtering reloads the map (a full re-render), so coalesce
         # keystrokes rather than firing on every one.
@@ -3897,6 +4175,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._custom_filter_timer.setInterval(350)
         self._custom_filter_timer.timeout.connect(self._apply_custom_filter)
 
+        self._reload_saved_filters()
         self._style_custom_filter_bar()
         self.custom_filter_bar.setVisible(False)
 
@@ -3917,18 +4196,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # carries a selector-less "background-color: {program_background}"
         # stylesheet, which cascades into all descendants and would otherwise
         # paint each label the program color instead of the bar's.
-        _bold = (f"background: transparent; color: {bar_fg};"
-                 " font-family: Roboto; font-weight: bold; font-size: 13px;")
-        self._cf_title_label.setStyleSheet(_bold)
-        for lbl in self._cf_field_labels:
-            lbl.setStyleSheet(_bold)
-        # Conjunctions are bold like the field labels, a point smaller so the
-        # field names still lead.
         for lbl in self._cf_conj_labels:
             lbl.setStyleSheet(
                 f"background: transparent; color: {bar_fg};"
                 " font-family: Roboto; font-weight: bold; font-size: 12px;"
             )
+        # The placeholder names the box now that the labels are gone, so it is
+        # darkened from Qt's default near-invisible gray - but kept clearly
+        # lighter than typed text so an empty box still reads as empty. It has
+        # to be a palette role: Qt 5's stylesheet parser has no
+        # placeholder-text-color property and warns "Unknown property" for it.
+        _ph_palette = QtGui.QPalette()
+        _ph_palette.setColor(QtGui.QPalette.PlaceholderText, QtGui.QColor("#8A8A8A"))
         for edit in self._cf_inputs.values():
             edit.setStyleSheet(
                 "QLineEdit { background-color: #FFFFFF; color: #333333;"
@@ -3936,6 +4215,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 " padding: 1px 5px; font-family: Roboto; font-size: 12px; }"
                 "QLineEdit:focus { border: 1px solid #28a745; }"
             )
+            edit.setPalette(_ph_palette)
+        # Both dropdowns match the criteria boxes. Two rules that look harmless
+        # are deliberately absent: styling ::drop-down erases Qt's built-in
+        # arrow (leaving something that reads as a text box), and the popup list
+        # is a separate top-level widget, so QAbstractItemView must be styled
+        # here or the list falls back to the platform palette.
+        _combo_qss = (
+            "QComboBox { background-color: #FFFFFF; color: #333333;"
+            " border: 1px solid rgba(0,0,0,0.25); border-radius: 3px;"
+            " padding: 1px 5px; font-family: Roboto; font-size: 12px; }"
+            "QComboBox:focus { border: 1px solid #28a745; }"
+            "QComboBox QAbstractItemView { background-color: #FFFFFF; color: #333333;"
+            " selection-background-color: #cce5ff; selection-color: #000000;"
+            " font-family: Roboto; font-size: 12px; }"
+        )
+        self._cf_saved_combo.setStyleSheet(_combo_qss)
+        self._cf_mode_combo.setStyleSheet(_combo_qss)
         # Fixed brand colors, scaled down to the bar's 22px button height.
         for btn, color in self._cf_action_buttons:
             btn.setStyleSheet(
@@ -3946,29 +4242,120 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_custom_filter_mode_ui()
 
     def _refresh_custom_filter_mode_ui(self) -> None:
-        """Sync the AND/OR pill styling and the conjunction labels to
+        """Sync the AND/OR dropdown and the conjunction labels to
         self._custom_filter_mode."""
-        bar_fg = self.config.get_color('feed_foreground')
-        for mode, btn in self._cf_mode_buttons.items():
-            active = (mode == self._custom_filter_mode)
-            fill = "#28a745" if active else "rgba(255,255,255,0.16)"
-            fg = "#FFFFFF" if active else bar_fg
-            btn.setStyleSheet(
-                f"QPushButton {{ background-color: {fill}; color: {fg};"
-                " border: none; border-radius: 4px;"
-                " font-family: Roboto; font-weight: bold; font-size: 12px; }"
-            )
+        idx = self._cf_mode_combo.findData(self._custom_filter_mode)
+        if idx >= 0 and idx != self._cf_mode_combo.currentIndex():
+            # Blocked: setting the index would re-enter _on_custom_filter_mode.
+            self._cf_mode_combo.blockSignals(True)
+            self._cf_mode_combo.setCurrentIndex(idx)
+            self._cf_mode_combo.blockSignals(False)
         for lbl in self._cf_conj_labels:
             lbl.setText(self._custom_filter_mode.upper())
 
     def _on_custom_filter_mode(self, mode: str) -> None:
-        """AND/OR pill clicked - reflow the labels and re-filter immediately
-        (a single click needs no debounce)."""
+        """AND/OR picked - reflow the labels and re-filter immediately
+        (a single selection needs no debounce)."""
         if mode not in ("and", "or") or mode == self._custom_filter_mode:
             return
         self._custom_filter_mode = mode
         self._refresh_custom_filter_mode_ui()
         self._apply_custom_filter()
+
+    _CF_PLACEHOLDER = "-- SAVED FILTERS --"
+
+    def _reload_saved_filters(self, select: str = None) -> None:
+        """Refill the saved-filter dropdown from map_filters.
+
+        select: name to leave selected; defaults to the placeholder. Signals are
+        blocked while rebuilding so clearing the list never fires a selection.
+        """
+        rows = self.db.get_map_filters()
+        self._cf_saved = {r[0]: r[1:] for r in rows}
+
+        self._cf_saved_combo.blockSignals(True)
+        self._cf_saved_combo.clear()
+        self._cf_saved_combo.addItem(self._CF_PLACEHOLDER, None)
+        for name, *_rest in rows:
+            self._cf_saved_combo.addItem(name, name)
+        idx = self._cf_saved_combo.findData(select) if select else 0
+        self._cf_saved_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._cf_saved_combo.blockSignals(False)
+
+    def _on_saved_filter_selected(self, _idx: int) -> None:
+        """Load a saved criteria set into the boxes and re-filter once."""
+        name = self._cf_saved_combo.currentData()
+        if not name:
+            return                      # Placeholder: leave what is typed alone.
+        saved = self._cf_saved.get(name)
+        if not saved:
+            return
+        from_call, to_call, sr_id, grid, mode = saved
+        # Signals blocked: four textChanged firings would each restart the
+        # debounce timer, and the single _apply_custom_filter below covers all.
+        for key, value in (("from", from_call), ("to", to_call),
+                           ("id", sr_id), ("grid", grid)):
+            edit = self._cf_inputs[key]
+            edit.blockSignals(True)
+            edit.setText(value or "")
+            edit.blockSignals(False)
+        self._custom_filter_mode = mode if mode in ("and", "or") else "or"
+        self._refresh_custom_filter_mode_ui()
+        self._apply_custom_filter()
+
+    def _on_save_custom_filter(self) -> None:
+        """Name the current criteria and store them in map_filters."""
+        from ui_helpers import confirm, prompt_text
+
+        values = {key: edit.text().strip() for key, edit in self._cf_inputs.items()}
+        if not any(values.values()):
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Filtering",
+                "Enter at least one criteria before saving."
+            )
+            return
+
+        name = prompt_text(self, "Save Filter", "Filter name:",
+                           **self._help_theme_colors())
+        if not name:
+            return                      # Cancelled or left empty.
+
+        if name.upper() in {n.upper() for n in self._cf_saved}:
+            if not confirm(
+                self, "Replace Filter",
+                f'A filter named "{name}" already exists.\n\nReplace it?'
+            ):
+                return
+
+        if not self.db.save_map_filter(
+            name, values["from"], values["to"], values["id"], values["grid"],
+            self._custom_filter_mode
+        ):
+            QtWidgets.QMessageBox.critical(
+                self, "Custom Filtering", "Could not save the filter."
+            )
+            return
+        self._reload_saved_filters(select=name)
+
+    def _on_delete_custom_filter(self) -> None:
+        """Delete the saved filter currently shown in the dropdown."""
+        from ui_helpers import confirm
+
+        name = self._cf_saved_combo.currentData()
+        if not name:
+            QtWidgets.QMessageBox.warning(
+                self, "Custom Filtering",
+                "Select a saved filter to delete."
+            )
+            return
+        if not confirm(self, "Delete Filter", f'Delete the saved filter "{name}"?'):
+            return
+        if not self.db.delete_map_filter(name):
+            QtWidgets.QMessageBox.critical(
+                self, "Custom Filtering", "Could not delete the filter."
+            )
+        # Back to the placeholder; the criteria boxes keep filtering as they are.
+        self._reload_saved_filters()
 
     def _custom_filter_match(self, row) -> bool:
         """True if a statrep row passes the Custom Filtering bar's criteria.
@@ -4917,6 +5304,96 @@ class MainWindow(QtWidgets.QMainWindow):
         print(f"{prefix}QRZ lookup failed, using fallback grid")
         return fallback_grid if fallback_grid else ""
 
+    def _find_callsign_duplicate(
+        self,
+        table: str,
+        id_field: str,
+        date_only: str,
+        id_value: str,
+        from_callsign: str
+    ) -> Optional[tuple]:
+        """
+        Find an existing row for the same record sent by the same station.
+
+        Looks up on (date, id_field) — the leading columns of the table's UNIQUE
+        index — then compares base callsigns in Python so N0DDK and N0DDK/P match.
+
+        Args:
+            table: Table name (messages, alerts, statrep)
+            id_field: Name of the record's ID column (msg_id, alert_id, sr_id)
+            date_only: Date portion "YYYY-MM-DD"
+            id_value: The record ID to match
+            from_callsign: Incoming sender callsign (suffix included)
+
+        Returns:
+            (row_id, stored_from_callsign) of the matching row, or None.
+        """
+        incoming_base = base_callsign(from_callsign)
+        if not incoming_base:
+            return None
+        try:
+            with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                rows = conn.execute(
+                    f"SELECT id, from_callsign FROM {table} WHERE date = ? AND {id_field} = ?",
+                    (date_only, id_value)
+                ).fetchall()
+        except sqlite3.Error:
+            return None
+
+        for row_id, stored_call in rows:
+            if base_callsign(stored_call or "") == incoming_base:
+                return (row_id, stored_call or "")
+        return None
+
+    def _upgrade_duplicate_row(
+        self,
+        table: str,
+        row_id: int,
+        stored_callsign: str,
+        incoming_callsign: str,
+        incoming_global_id: int = 0
+    ) -> None:
+        """
+        Carry the richer values from a discarded duplicate onto the row we keep.
+
+        Prefers the suffixed callsign: if the stored row has the bare base (N0DDK)
+        and the duplicate carries the suffix the operator transmitted (N0DDK/P),
+        promote the stored row so the fuller callsign survives no matter which copy
+        arrived first. Also backfills global_id when the stored row lacks one.
+
+        Args:
+            table: Table name
+            row_id: Primary key of the row being kept
+            stored_callsign: from_callsign currently on that row
+            incoming_callsign: from_callsign of the duplicate being discarded
+            incoming_global_id: global_id from the duplicate (0 when absent/unsupported)
+        """
+        if "/" in (incoming_callsign or "") and "/" not in (stored_callsign or ""):
+            try:
+                with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                    conn.execute(
+                        f"UPDATE {table} SET from_callsign = ? WHERE id = ?",
+                        (incoming_callsign, row_id)
+                    )
+                    conn.commit()
+            except sqlite3.IntegrityError:
+                # A suffixed row already occupies that UNIQUE key — leave this one as is.
+                pass
+            except sqlite3.Error:
+                pass
+
+        if incoming_global_id:
+            try:
+                with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
+                    conn.execute(
+                        f"UPDATE {table} SET global_id = ? "
+                        f"WHERE id = ? AND (global_id IS NULL OR global_id = 0)",
+                        (incoming_global_id, row_id)
+                    )
+                    conn.commit()
+            except sqlite3.Error:
+                pass
+
     def _insert_message_data(
         self,
         rig_name: str,
@@ -4942,6 +5419,26 @@ class MainWindow(QtWidgets.QMainWindow):
         Returns:
             msg_type on success, empty string on failure
         """
+        # Suffix-insensitive duplicate check. The UNIQUE indexes key on the literal
+        # from_callsign, so a record saved locally as N0DDK/P and returned by the
+        # commsrvr as N0DDK does not collide and would be written twice. Compare the
+        # base callsigns here, before the insert, to catch that.
+        # Skipped for videos (id_field='global_id' — their key is the server ID, not
+        # the callsign) and for any table whose data dict lacks the columns.
+        if id_field != 'global_id' and 'date' in data and 'from_callsign' in data:
+            existing = self._find_callsign_duplicate(
+                table, id_field, data['date'], data[id_field], data['from_callsign']
+            )
+            if existing:
+                _ex_id, _ex_call = existing
+                incoming_global_id = data.get('global_id', 0)
+                print(f"[{rig_name}] Skipping duplicate {msg_type.upper()} {data.get(id_field, '')} from {from_callsign} — already received (Global ID: {incoming_global_id})")
+                self._upgrade_duplicate_row(
+                    table, _ex_id, _ex_call, data['from_callsign'],
+                    incoming_global_id if 'global_id' in data else 0
+                )
+                return ""
+
         columns = ", ".join(data.keys())
         placeholders = ", ".join(["?" for _ in data])
         query = f"INSERT INTO {table} ({columns}) VALUES({placeholders})"
@@ -6049,6 +6546,48 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"[Earthquake] map overlay failed: {e}")
 
+    def _add_member_pins_to_map(self, m) -> None:
+        """Add persistent pink halo pins for group members to the folium map.
+
+        Drawn before the StatRep pins so live pins render on top, and queried
+        outside the StatRep pipeline so they ignore every date/group/hide
+        filter and never appear in the status report table."""
+        self._member_pin_click_js = []
+        try:
+            shown_groups = self.config.get_member_pin_groups()
+            if not shown_groups:
+                return
+            for callsign, lat, lon, grid in self.db.get_member_pins(shown_groups):
+                try:
+                    if lat is None or lon is None:
+                        coords = self._grid_to_latlon(grid or "")
+                        if coords is None:
+                            continue
+                        lat, lon = coords
+                    marker = folium.CircleMarker(
+                        location=[float(lat), float(lon)],
+                        radius=10,
+                        fill=True,
+                        color="#e83e8c",
+                        fill_color="#e83e8c",
+                        fill_opacity=0.40,
+                        opacity=0,
+                        weight=2,
+                        tooltip=callsign,
+                    )
+                    marker.add_to(m)
+                    # Clicking the halo opens the QRZ Lookup module, routed
+                    # through the commstat:// scheme intercepted in
+                    # CustomWebEnginePage.acceptNavigationRequest.
+                    self._member_pin_click_js.append(
+                        f"{marker.get_name()}.on('click', function() {{"
+                        f" window.location.href = 'commstat://member-pin/{callsign}'; }});"
+                    )
+                except Exception as e:
+                    print(f"[MemberPins] skipped {callsign}: {e}")
+        except Exception as e:
+            print(f"[MemberPins] map overlay failed: {e}")
+
     def _grid_to_latlon(self, grid: str) -> Optional[Tuple[float, float]]:
         """Convert a Maidenhead grid square to (lat, lon), or None if invalid."""
         try:
@@ -6149,6 +6688,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # "world" lights up when any pin falls OUTSIDE the continental US bbox.
         US_BBOX = REGION_BBOX["us"]
         region_counts = {"us": 0, "eu": 0, "mideast": 0, "seasia": 0, "world": 0}
+
+        # Member pins go on the map first so StatRep pins paint on top of them.
+        self._add_member_pins_to_map(m)
 
         pin_registry = {}  # statrep_id -> [lat, lon] for bounce/pan; populated inside try
         # Get StatRep data for pins
@@ -6521,6 +7063,18 @@ window.commstatBouncePin = function(srid) {
 };
 </script>"""
         map_html = map_html.replace('</body>', bounce_js + '\n</body>')
+
+        # Member pin click bindings (built in _add_member_pins_to_map).
+        # Folium emits the script that DEFINES the marker variables after
+        # </body>, i.e. after this injected block executes — so the bindings
+        # must wait for the window load event or they hit a ReferenceError.
+        if getattr(self, '_member_pin_click_js', None):
+            member_click_js = (
+                '<script>\nwindow.addEventListener("load", function() {\n'
+                + '\n'.join(self._member_pin_click_js)
+                + '\n});\n</script>'
+            )
+            map_html = map_html.replace('</body>', member_click_js + '\n</body>')
 
         # Always set new HTML content (reload() only refreshes cached content).
         # Exception: while a video is playing, map_widget is showing the video
@@ -7584,6 +8138,41 @@ window.commstatBouncePin = function(srid) {
         self._load_statrep_data()
         self._save_map_position(callback=self._load_map)
 
+    def _on_toggle_member_pin_group(self, group_name: str, checked: bool) -> None:
+        """Show or hide one group's member pins on the map."""
+        shown = self.config.get_member_pin_groups()
+        if checked and group_name not in shown:
+            shown.append(group_name)
+        elif not checked and group_name in shown:
+            shown.remove(group_name)
+        self.config.set_member_pin_groups(shown)
+        self._save_map_position(callback=self._load_map)
+
+    def _on_member_pins_help(self) -> None:
+        """Open the Group Member Pins help module."""
+        show = self._resolve_dialog_class("help", "show_member_pins_help")
+        show(self, **self._help_theme_colors())
+
+    def _on_member_pin_clicked(self, callsign: str) -> None:
+        """Open the QRZ Lookup module for a member pin's callsign — the same
+        module that opens when clicking a callsign in the Contacts table."""
+        callsign = (callsign or "").strip().upper()
+        if not callsign:
+            return
+        from qrz_lookup import QRZLookupDialog
+        dlg = QRZLookupDialog(
+            module_background=self.config.get_color('module_background'),
+            module_foreground=self.config.get_color('module_foreground'),
+            program_background=self.config.get_color('program_background'),
+            program_foreground=self.config.get_color('program_foreground'),
+            refresh_callback=self._load_message_data,
+            parent=self
+        )
+        dlg.cs_edit.setText(callsign)
+        dlg._search()
+        dlg.msg_edit.setFocus()
+        dlg.exec_()
+
     def _on_toggle_save_all_alerts(self, checked: bool) -> None:
         """Save all incoming group alerts, not just those for groups in the local table."""
         self.config.set_save_all_alerts(checked)
@@ -7624,18 +8213,25 @@ window.commstatBouncePin = function(srid) {
         )
         self._large_map_dlg.show()
 
+    def _map_pane_is_free(self) -> bool:
+        """True while the pane is showing a region map.
+
+        New alerts and videos may only take the pane when this is true. If the
+        operator has deliberately parked the pane on Images, Alerts, Videos or
+        Contacts, incoming data must not yank it out from under them — the
+        orange Alerts / Videos button is the notification instead.
+        """
+        return getattr(self, '_current_view_mode', '') in _MAP_REGION_MODES
+
     def _trigger_show_alerts(self) -> None:
         """Trigger Show Alerts mode when a new alert is received."""
+        if not self._map_pane_is_free():
+            return
         self._set_map_view_mode("alerts")
 
     def _trigger_show_videos(self) -> None:
-        """Trigger Videos mode when a new video is received.
-
-        No-op while Videos is already the active view: alerts are static text
-        so re-entering is harmless, but restarting playback at the newest row
-        would yank a video the operator is part-way through.
-        """
-        if getattr(self, '_current_view_mode', '') == "videos":
+        """Trigger Videos mode when a new video is received."""
+        if not self._map_pane_is_free():
             return
         self._set_map_view_mode("videos")
 
@@ -7876,10 +8472,14 @@ window.commstatBouncePin = function(srid) {
         dialog.exec_()
         self._populate_groups_menu()
         self._populate_filter_groups_menu()
-        # Prune unchecked_groups entries for groups that no longer exist
+        self._populate_member_pins_menu()
+        # Prune unchecked_groups and member_pin_groups entries for groups that
+        # no longer exist
         all_groups = set(self.db.get_all_groups())
         pruned = [g for g in self.config.get_unchecked_groups() if g in all_groups]
         self.config.set_unchecked_groups(pruned)
+        pin_pruned = [g for g in self.config.get_member_pin_groups() if g in all_groups]
+        self.config.set_member_pin_groups(pin_pruned)
         self._refresh_all_data()
 
 
@@ -7906,6 +8506,23 @@ window.commstatBouncePin = function(srid) {
             action.triggered.connect(lambda checked, g=name: self._on_toggle_group_filter(g, checked))
             self.filter_menu.insertAction(self.show_every_group_action, action)
             self.filter_group_actions[name] = action
+
+    def _populate_member_pins_menu(self) -> None:
+        """Populate the Group Member Pins section with one checkbox per group
+        that has members, inserted above the section's Help item."""
+        for action in self.member_pin_group_actions.values():
+            self.filter_menu.removeAction(action)
+        self.member_pin_group_actions.clear()
+
+        shown = set(self.config.get_member_pin_groups())
+        counts = self.db.get_group_member_counts()
+        for name in sorted(n for n, c in counts.items() if c > 0):
+            action = QtWidgets.QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(name in shown)
+            action.triggered.connect(lambda checked, g=name: self._on_toggle_member_pin_group(g, checked))
+            self.filter_menu.insertAction(self.member_pins_help_action, action)
+            self.member_pin_group_actions[name] = action
 
     def _on_js8_connectors(self) -> None:
         """Open JS8 Connectors management window."""
@@ -8231,7 +8848,8 @@ window.commstatBouncePin = function(srid) {
                     # _process_directed_message membership gate) so "Save all
                     # Messages" can capture groups we are not a member of.
                     _pp = self._preprocess_message_value(value, from_call)
-                    _from_base = from_call.split("/")[0] if from_call else ""
+                    # Callsign keeps its suffix (see _parse_commstat_message)
+                    _from_base = from_call.strip().upper() if from_call else ""
                     _utc_db = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
                     _dial_freq = freq - offset if freq else 0
                     _gm_type, _ = self._parse_group_message(
@@ -8309,7 +8927,7 @@ window.commstatBouncePin = function(srid) {
         Args:
             rig_name: Name of the rig/source
             message_value: Message text
-            from_callsign: Sender callsign (base callsign without suffix)
+            from_callsign: Sender callsign as transmitted, '/' suffix included
             target: Target @GROUP or callsign
             grid: Grid square from TCP params or empty for commsrvr
             freq: Frequency in Hz
@@ -8371,25 +8989,18 @@ window.commstatBouncePin = function(srid) {
         sr_fields = list(srcode[:12])  # Use only first 12 digits
         date_only, _ = parse_message_datetime(utc)
 
-        # Commsrvr duplicate detection: if we already have this record, only update global_id
+        # Commsrvr duplicate detection: if we already have this record, only update
+        # global_id. Callsigns are matched on their base form so the copy returned by
+        # the server (N0DDK) still matches the one we stored locally (N0DDK/P).
         if source == 2:
-            try:
-                with sqlite3.connect(DATABASE_FILE, timeout=10) as _conn:
-                    _existing = _conn.execute(
-                        "SELECT id, global_id FROM statrep WHERE date = ? AND from_callsign = ? AND sr_id = ?",
-                        (date_only, from_callsign, sr_id)
-                    ).fetchone()
-                    if _existing:
-                        _ex_id, _ex_gid = _existing
-                        if global_id and not _ex_gid:
-                            _conn.execute(
-                                "UPDATE statrep SET global_id = ? WHERE id = ?",
-                                (global_id, _ex_id)
-                            )
-                            _conn.commit()
-            except sqlite3.Error:
-                _existing = None
+            _existing = self._find_callsign_duplicate(
+                "statrep", "sr_id", date_only, sr_id, from_callsign
+            )
             if _existing:
+                _ex_id, _ex_call = _existing
+                self._upgrade_duplicate_row(
+                    "statrep", _ex_id, _ex_call, from_callsign, global_id
+                )
                 print(f"[{rig_name}] Skipping duplicate STATREP {sr_id} from {from_callsign} — already received (Global ID: {global_id})")
                 return ("", None)
 
@@ -8451,7 +9062,7 @@ window.commstatBouncePin = function(srid) {
         Args:
             rig_name: Name of the rig/source
             message_value: Message text
-            from_callsign: Sender callsign (base callsign without suffix)
+            from_callsign: Sender callsign as transmitted, '/' suffix included
             target: Target @GROUP or callsign
             freq: Frequency in Hz
             snr: Signal-to-noise ratio in dB
@@ -8509,13 +9120,15 @@ window.commstatBouncePin = function(srid) {
 
         # Filter alerts by target
         if not alert_target.startswith("@"):
-            # No @ prefix — target is a callsign; accept if it matches any known callsign
-            user_callsigns = [c.upper() for c in self.rig_callsigns.values() if c]
+            # No @ prefix — target is a callsign; accept if it matches any known callsign.
+            # Compared on base callsigns: an operator running as N0DDK/P must still
+            # receive traffic addressed to plain N0DDK.
+            user_callsigns = [base_callsign(c) for c in self.rig_callsigns.values() if c]
             if not user_callsigns:
                 local_callsign, _, __ = self.db.get_user_settings()
                 if local_callsign:
-                    user_callsigns = [local_callsign.upper()]
-            if alert_target.upper() not in user_callsigns:
+                    user_callsigns = [base_callsign(local_callsign)]
+            if base_callsign(alert_target) not in user_callsigns:
                 return ("", None)
         else:
             # @GROUP — only save if we're a member of that group (active or not),
@@ -8568,7 +9181,7 @@ window.commstatBouncePin = function(srid) {
         Args:
             rig_name: Name of the rig/source
             message_value: Message text (includes leading "callsign: " prefix)
-            from_callsign: Sender callsign (base callsign without suffix)
+            from_callsign: Sender callsign as transmitted, '/' suffix included
             utc: UTC timestamp string "YYYY-MM-DD HH:MM:SS"
             global_id: Server-assigned message ID — the videos table's dedup key
                 (videos has no separate locally-generated id like alert_id/sr_id)
@@ -8600,12 +9213,13 @@ window.commstatBouncePin = function(srid) {
                 if group_name not in all_groups:
                     return ("", None)
         else:
-            user_callsigns = [c.upper() for c in self.rig_callsigns.values() if c]
+            # Base-callsign compare so a /P operator still receives their own traffic
+            user_callsigns = [base_callsign(c) for c in self.rig_callsigns.values() if c]
             if not user_callsigns:
                 local_callsign, _, __ = self.db.get_user_settings()
                 if local_callsign:
-                    user_callsigns = [local_callsign.upper()]
-            if video_target.upper() not in user_callsigns:
+                    user_callsigns = [base_callsign(local_callsign)]
+            if base_callsign(video_target) not in user_callsigns:
                 return ("", None)
 
         data = {
@@ -8647,7 +9261,7 @@ window.commstatBouncePin = function(srid) {
         Args:
             rig_name: Name of the rig/source
             message_value: Message text
-            from_callsign: Sender callsign (base callsign without suffix)
+            from_callsign: Sender callsign as transmitted, '/' suffix included
             target: Target @GROUP or callsign
             freq: Frequency in Hz
             snr: Signal-to-noise ratio in dB
@@ -8727,14 +9341,15 @@ window.commstatBouncePin = function(srid) {
                     # Skip messages to groups we're not in
                     return ("", None)
         else:
-            # Direct message - only save if to one of our callsigns
-            target_call = msg_target.upper()
-            user_callsigns = [c.upper() for c in self.rig_callsigns.values() if c]
+            # Direct message - only save if to one of our callsigns.
+            # Base-callsign compare so a /P operator still receives their own traffic.
+            target_call = base_callsign(msg_target)
+            user_callsigns = [base_callsign(c) for c in self.rig_callsigns.values() if c]
             if not user_callsigns:
                 # No JS8 connectors active — fall back to user settings callsign
                 settings_callsign, _, __ = self.db.get_user_settings()
                 if settings_callsign:
-                    user_callsigns = [settings_callsign.upper()]
+                    user_callsigns = [base_callsign(settings_callsign)]
             if target_call not in user_callsigns:
                 # Skip messages not to our callsigns
                 return ("", None)
@@ -8834,13 +9449,14 @@ window.commstatBouncePin = function(srid) {
                 if group_name not in self.db.get_all_groups():
                     return ("", None)
         else:
-            # Bare callsign target — only save if it's one of our callsigns
-            user_callsigns = [c.upper() for c in self.rig_callsigns.values() if c]
+            # Bare callsign target — only save if it's one of our callsigns.
+            # Base-callsign compare so a /P operator still receives their own traffic.
+            user_callsigns = [base_callsign(c) for c in self.rig_callsigns.values() if c]
             if not user_callsigns:
                 settings_callsign, _, __ = self.db.get_user_settings()
                 if settings_callsign:
-                    user_callsigns = [settings_callsign.upper()]
-            if msg_target.upper() not in user_callsigns:
+                    user_callsigns = [base_callsign(settings_callsign)]
+            if base_callsign(msg_target) not in user_callsigns:
                 return ("", None)
 
         date_only, msg_id = parse_message_datetime(utc)
@@ -8894,7 +9510,8 @@ window.commstatBouncePin = function(srid) {
         """
         from id_utils import parse_message_datetime
 
-        actual_sender = actual_sender.split("/")[0].upper()
+        # Keep the callsign as transmitted, suffix included (see _parse_commstat_message)
+        actual_sender = actual_sender.strip().upper()
         content = content.strip()
         if not content or not actual_sender:
             return ""
@@ -8944,7 +9561,7 @@ window.commstatBouncePin = function(srid) {
 
         Args:
             rig_name: Name of the rig/source
-            from_callsign: Sender callsign (base callsign without suffix)
+            from_callsign: Sender callsign as transmitted, '/' suffix included
             message_value: Message text (already preprocessed)
             target: Target @GROUP or callsign
             grid: Grid square from TCP params or empty for commsrvr
@@ -8962,8 +9579,10 @@ window.commstatBouncePin = function(srid) {
         if not from_callsign or not message_value:
             return ("", None)
 
-        # Extract base callsign (remove /P, /M suffixes)
-        from_callsign = from_callsign.split("/")[0]
+        # Keep the callsign as transmitted, suffix included (N0DDK/P stays N0DDK/P) —
+        # only case is normalized. Duplicate detection compares base callsigns, so the
+        # suffix no longer splits a record into two rows.
+        from_callsign = from_callsign.strip().upper()
 
         # Detect Internet-Only markers and normalize
         if "{&%3}" in message_value or "{%%3}" in message_value or "{^%3}" in message_value:
@@ -9057,8 +9676,8 @@ window.commstatBouncePin = function(srid) {
         # Preprocess message value
         value = self._preprocess_message_value(value, from_call)
 
-        # Extract base callsign
-        from_callsign = from_call.split("/")[0] if from_call else ""
+        # Keep the callsign as transmitted, suffix included (see _parse_commstat_message)
+        from_callsign = from_call.strip().upper() if from_call else ""
 
         # Extract target group
         target = ""
@@ -9069,7 +9688,9 @@ window.commstatBouncePin = function(srid) {
         user_callsign = self.get_callsign_for_rig(rig_name)
         if not user_callsign:
             user_callsign, _, __ = self.db.get_user_settings()
-        is_to_user = to_call.split("/")[0].upper() == user_callsign.upper() if user_callsign else False
+        # Base-callsign compare on both sides: our own rig callsign may carry a suffix
+        # (N0DDK/P), and traffic may be addressed to either form.
+        is_to_user = base_callsign(to_call) == base_callsign(user_callsign) if user_callsign else False
 
         # Group check: groups accepted if in our groups list, plus the
         # always-accepted network-wide group (treated as if we were a member,
