@@ -2,19 +2,28 @@
 # This file is part of CommStat.
 # Licensed under the GNU General Public License v3.0.
 """
-group_members.py - Group Members Dialog
+watchlist_members.py - Watchlist Members Dialog
 
-Lists the member callsigns of one group with Add and Remove actions.
-Adding searches the local qrz table first, then the QRZ.com XML API; a
-callsign found nowhere can be entered manually. Members render on the map
-as persistent pink halo pins when Filter -> Member Pins is checked.
+Lists the member callsigns of one watchlist with Add, Bulk Add, and Remove
+actions. Adding searches the local qrz table first, then the QRZ.com XML
+API; a callsign found nowhere can be entered manually. Bulk Add takes a
+pasted comma-separated callsign list and resolves each the same way (no
+manual fallback — unresolved callsigns are reported). Members render on the
+map as persistent objects when their watchlist is checked under
+Map -> Watchlist Overlay.
+
+The Grid field stays editable on a search hit: QRZ/FCC location data goes
+stale when people move, so a changed grid is saved to qrz.grid_override —
+a local-only column that QRZ.com API refreshes never overwrite.
 """
 
+import re
+
 from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QTableWidget, QTableWidgetItem,
+    QLabel, QPlainTextEdit, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QAbstractItemView, QWidget,
 )
 
@@ -25,7 +34,8 @@ from constants import (
     COLOR_INPUT_TEXT, COLOR_INPUT_BORDER, FONT_MONO_STACK,
 )
 from ui_helpers import make_button, make_input, confirm, apply_standard_dialog_chrome
-from qrz_client import get_qrz_cached, load_qrz_config
+from qrz_client import QRZClient, get_qrz_cached, load_qrz_config
+from gridfinder import format_grid
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -61,22 +71,128 @@ def _field_style(read_only: bool) -> str:
     )
 
 
+# ── Bulk lookup worker ─────────────────────────────────────────────────────────
+
+class _BulkLookupThread(QThread):
+    """Resolves a list of callsigns sequentially in the background: local qrz
+    cache first (stale rows are valid member identities), then the QRZ.com API
+    when the subscription is active. Only lookups happen here — all
+    watchlistMembers writes stay on the main thread in _on_bulk_done."""
+
+    progress = pyqtSignal(int, int, str)          # done, total, callsign
+    lookup_done = pyqtSignal(list, list, list)    # resolved, failed, api_fetched
+
+    def __init__(self, callsigns, username, password, use_api: bool):
+        super().__init__()
+        self._callsigns = callsigns
+        self._username = username
+        self._password = password
+        self._use_api = use_api
+
+    def run(self) -> None:
+        client = QRZClient(self._username, self._password) if self._use_api else None
+        resolved, failed, fetched = [], [], []
+        total = len(self._callsigns)
+        for done, cs in enumerate(self._callsigns, 1):
+            self.progress.emit(done, total, cs)
+            row = get_qrz_cached(cs, include_stale=True)
+            if row is None and client is not None:
+                if client.lookup(cs):
+                    fetched.append(cs)
+                    row = get_qrz_cached(cs, include_stale=True)
+            if row:
+                resolved.append(cs)
+            else:
+                failed.append(cs)
+        self.lookup_done.emit(resolved, failed, fetched)
+
+
+# ── Bulk add failure report ────────────────────────────────────────────────────
+
+class _BulkFailedDialog(QDialog):
+    """Styled report of the callsigns a bulk add could not resolve, shown as a
+    selectable comma-separated list with a one-click Copy button."""
+
+    def __init__(self, watchlist_name: str, failed, parent=None):
+        super().__init__(parent)
+        self._failed_text = ", ".join(failed)
+
+        apply_standard_dialog_chrome(self, "Bulk Add", 520, 280)
+        self.setStyleSheet(
+            f"QDialog {{ background-color:{_PANEL_BG}; color:{_PANEL_FG}; }}"
+            f"QLabel {{ font-size:13px; color:{_PANEL_FG}; }}"
+        )
+
+        body = QVBoxLayout(self)
+        body.setContentsMargins(15, 15, 15, 15)
+        body.setSpacing(10)
+
+        title_lbl = QLabel("Bulk Add Results")
+        title_lbl.setAlignment(Qt.AlignCenter)
+        title_lbl.setFont(QtGui.QFont("Roboto Slab", -1, QtGui.QFont.Black))
+        title_lbl.setFixedHeight(36)
+        title_lbl.setStyleSheet(
+            f"QLabel {{ background-color:{_PROG_BG}; color:{_PROG_FG};"
+            f" font-family:'Roboto Slab'; font-size:16px; font-weight:900;"
+            f" padding-top:9px; padding-bottom:9px; }}"
+        )
+        body.addWidget(title_lbl)
+
+        msg = QLabel(
+            f"{len(failed)} callsign{'s' if len(failed) != 1 else ''} could not"
+            f" be added to the {watchlist_name} watchlist:"
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet("QLabel { font-family:Roboto; font-size:13px; }")
+        body.addWidget(msg)
+
+        self.list_box = QPlainTextEdit()
+        self.list_box.setPlainText(self._failed_text)
+        self.list_box.setReadOnly(True)
+        self.list_box.setStyleSheet(
+            f"QPlainTextEdit {{ background-color:white; color:{COLOR_INPUT_TEXT};"
+            f" border:1px solid {COLOR_INPUT_BORDER}; border-radius:4px;"
+            f" padding:4px 8px; font-family:{FONT_MONO_STACK}; font-size:13px; }}"
+        )
+        body.addWidget(self.list_box)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.btn_copy = make_button("Copy List", COLOR_BTN_BLUE, 100)
+        self.btn_copy.clicked.connect(self._on_copy)
+        btn_close = make_button("Close", COLOR_BTN_CLOSE, 80)
+        btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(self.btn_copy)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_close)
+        body.addLayout(btn_row)
+
+    def _on_copy(self) -> None:
+        QtWidgets.QApplication.clipboard().setText(self._failed_text)
+        self.btn_copy.setText("Copied!")
+
+
 # ── Dialog ─────────────────────────────────────────────────────────────────────
 
-class GroupMembersDialog(QDialog):
-    """Group Members dialog — list, add, and remove member callsigns for a group."""
+class WatchlistMembersDialog(QDialog):
+    """Watchlist Members dialog — list, add, and remove member callsigns for a
+    watchlist."""
 
-    def __init__(self, db_manager, group_id: int, group_name: str, parent=None):
+    def __init__(self, db_manager, watchlist_id: int, watchlist_name: str, parent=None):
         super().__init__(parent)
         self.db = db_manager
-        self.group_id = group_id
-        self.group_name = group_name
+        self.watchlist_id = watchlist_id
+        self.watchlist_name = watchlist_name
 
         self._thread = None
+        self._bulk_thread = None
         self._pending_cs: str = ""
         self._manual_mode: bool = False
+        self._found_fcc_grid: str = ""
+        self._found_override: str = ""
 
-        apply_standard_dialog_chrome(self, f"@{group_name} Members", _WIN_W, _WIN_H)
+        apply_standard_dialog_chrome(
+            self, f"{watchlist_name} Watchlist Members", _WIN_W, _WIN_H)
 
         self._setup_ui()
         self._load()
@@ -94,7 +210,7 @@ class GroupMembersDialog(QDialog):
         body.setSpacing(10)
 
         # ── Title ─────────────────────────────────────────────────────────────
-        title_lbl = QLabel(f"@{self.group_name} Members")
+        title_lbl = QLabel(f"{self.watchlist_name} Watchlist Members")
         title_lbl.setAlignment(Qt.AlignCenter)
         title_lbl.setFont(QtGui.QFont("Roboto Slab", -1, QtGui.QFont.Black))
         title_lbl.setFixedHeight(36)
@@ -116,12 +232,12 @@ class GroupMembersDialog(QDialog):
         search_row.setSpacing(8)
         search_row.addWidget(QLabel("Callsign:"))
 
-        # Deferred import: this dialog is only constructed from groups.py at
-        # runtime, once little_gucci is fully loaded in sys.modules.
+        # Deferred import: this dialog is only constructed from watchlists.py
+        # at runtime, once little_gucci is fully loaded in sys.modules.
         from little_gucci import UpperCaseLineEdit
         self.cs_edit = UpperCaseLineEdit()
         self.cs_edit.setPlaceholderText("Callsign")
-        self.cs_edit.setMaxLength(12)
+        self.cs_edit.setMaxLength(15)
         self.cs_edit.setMinimumHeight(30)
         self.cs_edit.setFixedWidth(140)
         self.cs_edit.setStyleSheet(_field_style(read_only=False))
@@ -150,6 +266,10 @@ class GroupMembersDialog(QDialog):
         self.f_city     = make_input(max_len=30)
         self.f_state    = make_input(max_len=2)
         self.f_grid     = make_input(max_len=8)
+        self.f_grid.setToolTip(
+            "Editable — change the grid to override an out-of-date location.\n"
+            "The override sticks even when QRZ.com data is refreshed."
+        )
         self._fields = [self.f_callsign, self.f_name, self.f_city, self.f_state, self.f_grid]
 
         self.btn_save_member = make_button("Save", COLOR_BTN_GREEN, 80)
@@ -169,6 +289,35 @@ class GroupMembersDialog(QDialog):
 
         self.add_panel.setVisible(False)
         body.addWidget(self.add_panel)
+
+        # ── Bulk add panel (hidden until Bulk Add is clicked) ─────────────────
+        self.bulk_panel = QWidget()
+        bulk_layout = QVBoxLayout(self.bulk_panel)
+        bulk_layout.setContentsMargins(0, 0, 0, 0)
+        bulk_layout.setSpacing(4)
+
+        bulk_row = QHBoxLayout()
+        bulk_row.setSpacing(8)
+        bulk_row.addWidget(QLabel("Callsigns:"))
+
+        self.bulk_edit = UpperCaseLineEdit()
+        self.bulk_edit.setPlaceholderText("Paste comma-separated callsigns…")
+        self.bulk_edit.setMinimumHeight(30)
+        self.bulk_edit.setStyleSheet(_field_style(read_only=False))
+        self.bulk_edit.returnPressed.connect(self._on_bulk_submit)
+        bulk_row.addWidget(self.bulk_edit, 1)
+
+        self.btn_submit = make_button("Submit", COLOR_BTN_GREEN, 80)
+        self.btn_submit.clicked.connect(self._on_bulk_submit)
+        bulk_row.addWidget(self.btn_submit)
+        bulk_layout.addLayout(bulk_row)
+
+        self.lbl_bulk_status = QLabel("")
+        self.lbl_bulk_status.setStyleSheet("QLabel { font-family:Roboto; font-size:12px; }")
+        bulk_layout.addWidget(self.lbl_bulk_status)
+
+        self.bulk_panel.setVisible(False)
+        body.addWidget(self.bulk_panel)
 
         # ── Table ─────────────────────────────────────────────────────────────
         self.table = QTableWidget(0, len(_TABLE_COLS))
@@ -205,17 +354,20 @@ class GroupMembersDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        self.btn_add    = make_button("Add",    _COL_ADD,        80)
-        self.btn_remove = make_button("Remove", _COL_REMOVE,     80)
-        self.btn_close  = make_button("Close",  COLOR_BTN_CLOSE, 80)
+        self.btn_add      = make_button("Add",      _COL_ADD,        80)
+        self.btn_bulk_add = make_button("Bulk Add", _COL_ADD,        80)
+        self.btn_remove   = make_button("Remove",   _COL_REMOVE,     80)
+        self.btn_close    = make_button("Close",    COLOR_BTN_CLOSE, 80)
 
         self.btn_remove.setEnabled(False)
 
         self.btn_add.clicked.connect(self._on_add)
+        self.btn_bulk_add.clicked.connect(self._on_bulk_add)
         self.btn_remove.clicked.connect(self._on_remove)
         self.btn_close.clicked.connect(self.accept)
 
         btn_row.addWidget(self.btn_add)
+        btn_row.addWidget(self.btn_bulk_add)
         btn_row.addWidget(self.btn_remove)
         btn_row.addStretch()
         btn_row.addWidget(self.btn_close)
@@ -224,7 +376,7 @@ class GroupMembersDialog(QDialog):
     # ── Data loading ───────────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        members = self.db.get_group_members(self.group_id)
+        members = self.db.get_watchlist_members(self.watchlist_id)
         self.table.setRowCount(0)
         mono = QtGui.QFont("Kode Mono")
 
@@ -250,12 +402,15 @@ class GroupMembersDialog(QDialog):
     # ── Add / search flow ──────────────────────────────────────────────────────
 
     def _on_add(self) -> None:
+        self.bulk_panel.setVisible(False)
         self.add_panel.setVisible(True)
         self._reset_add_panel()
 
     def _reset_add_panel(self) -> None:
         """Clear the detail fields and return to the callsign+Search row."""
         self._manual_mode = False
+        self._found_fcc_grid = ""
+        self._found_override = ""
         self.detail_row.setVisible(False)
         for field in self._fields:
             field.clear()
@@ -315,21 +470,29 @@ class GroupMembersDialog(QDialog):
             self._enter_manual_mode(self._pending_cs)
 
     def _show_found(self, row: dict) -> None:
-        """Populate the detail fields read-only from a qrz table row."""
+        """Populate the detail fields from a qrz table row. Everything is
+        read-only except Grid — an existing override is shown in place of the
+        FCC grid, and editing the field updates the override on Save."""
         self._manual_mode = False
+        self._found_fcc_grid = format_grid((row.get("grid") or "").strip())
+        self._found_override = format_grid((row.get("grid_override") or "").strip())
         values = [
             row.get("callsign") or "", row.get("name") or "",
-            row.get("city") or "", row.get("state") or "", row.get("grid") or "",
+            row.get("city") or "", row.get("state") or "",
+            self._found_override or self._found_fcc_grid,
         ]
         for field, val in zip(self._fields, values):
             field.setText(val)
-            field.setReadOnly(True)
-            field.setStyleSheet(_field_style(read_only=True))
+            editable = field is self.f_grid
+            field.setReadOnly(not editable)
+            field.setStyleSheet(_field_style(read_only=not editable))
         self.detail_row.setVisible(True)
 
     def _enter_manual_mode(self, cs: str) -> None:
         """Let the user type the details for a callsign found nowhere."""
         self._manual_mode = True
+        self._found_fcc_grid = ""
+        self._found_override = ""
         for field in self._fields:
             field.clear()
             field.setReadOnly(False)
@@ -350,21 +513,99 @@ class GroupMembersDialog(QDialog):
                 self.f_name.text(),
                 self.f_city.text(),
                 self.f_state.text(),
-                self.f_grid.text(),
+                format_grid(self.f_grid.text()),
             )
         else:
             qrz_id = self.db.get_qrz_id(cs)
+            # A grid edited away from the FCC value becomes the override; put
+            # it back to the FCC value and the override clears.
+            new_grid = format_grid(self.f_grid.text().strip())
+            override = "" if new_grid == self._found_fcc_grid else new_grid
+            if override != self._found_override:
+                self.db.set_qrz_grid_override(cs, override)
         if qrz_id is None:
             QMessageBox.critical(self, "Error", f"Could not save {cs}.")
             return
-        if not self.db.add_group_member(self.group_id, qrz_id):
+        if not self.db.add_watchlist_member(self.watchlist_id, qrz_id):
             QMessageBox.warning(
                 self, "Members",
-                f"{cs} is already a member of @{self.group_name}."
+                f"{cs} is already on the {self.watchlist_name} watchlist."
             )
         self._load()
         # Rapid entry: the callsign box and Search stay up for the next one.
         self._reset_add_panel()
+
+    # ── Bulk add flow ──────────────────────────────────────────────────────────
+
+    def _on_bulk_add(self) -> None:
+        self.add_panel.setVisible(False)
+        self.bulk_panel.setVisible(True)
+        self.bulk_edit.clear()
+        self.lbl_bulk_status.setText("")
+        self.bulk_edit.setFocus()
+
+    def _on_bulk_submit(self) -> None:
+        if self._bulk_thread is not None and self._bulk_thread.isRunning():
+            return
+        # Comma-separated per the UI hint, but stray whitespace/newline
+        # separators parse the same. Duplicates collapse, order kept.
+        seen = set()
+        callsigns = []
+        for token in re.split(r"[,\s]+", self.bulk_edit.text().upper()):
+            if token and token not in seen:
+                seen.add(token)
+                callsigns.append(token)
+        if not callsigns:
+            return
+
+        is_active, username, password = load_qrz_config()
+        self.btn_submit.setEnabled(False)
+        self.lbl_bulk_status.setText(f"Processing {len(callsigns)} callsigns…")
+        self._bulk_thread = _BulkLookupThread(
+            callsigns, username, password, use_api=bool(is_active and username))
+        _live_threads.add(self._bulk_thread)
+        self._bulk_thread.finished.connect(
+            lambda t=self._bulk_thread: _live_threads.discard(t)
+        )
+        self._bulk_thread.progress.connect(self._on_bulk_progress)
+        self._bulk_thread.lookup_done.connect(self._on_bulk_done)
+        self._bulk_thread.start()
+
+    def _on_bulk_progress(self, done: int, total: int, cs: str) -> None:
+        self.lbl_bulk_status.setText(f"Looking up {cs}… ({done}/{total})")
+
+    def _on_bulk_done(self, resolved, failed, fetched) -> None:
+        self.btn_submit.setEnabled(True)
+
+        # API hits wrote the qrz cache from the worker thread; fire the
+        # module-level notifier from here (main thread) for each of them.
+        if fetched:
+            from qrz_lookup import qrz_cache_notifier
+            for cs in fetched:
+                qrz_cache_notifier.record_written.emit(cs)
+
+        failed = list(failed)
+        added = existing = 0
+        for cs in resolved:
+            qrz_id = self.db.get_qrz_id(cs)
+            if qrz_id is None:
+                failed.append(cs)
+            elif self.db.add_watchlist_member(self.watchlist_id, qrz_id):
+                added += 1
+            else:
+                existing += 1
+
+        self._load()
+        parts = [f"{added} added"]
+        if existing:
+            parts.append(f"{existing} already member{'s' if existing != 1 else ''}")
+        if failed:
+            parts.append(f"{len(failed)} failed")
+        self.lbl_bulk_status.setText(", ".join(parts))
+        self.bulk_edit.clear()
+
+        if failed:
+            _BulkFailedDialog(self.watchlist_name, failed, self).exec_()
 
     # ── Remove ─────────────────────────────────────────────────────────────────
 
@@ -378,10 +619,10 @@ class GroupMembersDialog(QDialog):
         cs = item.text()
         qrz_id = item.data(Qt.UserRole)
         if not confirm(self, "Remove Member",
-                       f"Remove {cs} from @{self.group_name}?",
+                       f"Remove {cs} from the {self.watchlist_name} watchlist?",
                        no_label="Cancel"):
             return
-        if not self.db.remove_group_member(self.group_id, qrz_id):
+        if not self.db.remove_watchlist_member(self.watchlist_id, qrz_id):
             QMessageBox.critical(self, "Error", "Could not remove member.")
             return
         self._load()
@@ -394,6 +635,12 @@ class GroupMembersDialog(QDialog):
         if self._thread is not None and self._thread.isRunning():
             try:
                 self._thread.result_ready.disconnect(self._on_qrz_result)
+            except TypeError:
+                pass
+        if self._bulk_thread is not None and self._bulk_thread.isRunning():
+            try:
+                self._bulk_thread.progress.disconnect(self._on_bulk_progress)
+                self._bulk_thread.lookup_done.disconnect(self._on_bulk_done)
             except TypeError:
                 pass
         super().done(result)

@@ -29,6 +29,7 @@ from constants import (
     COLOR_DISABLED_BG, COLOR_DISABLED_TEXT,
     COLOR_BTN_GREEN, COLOR_BTN_BLUE, COLOR_BTN_CYAN, COLOR_BTN_HELP,
     RIG_FETCH_DELAY_MS, RIG_FREQ_DELAY_MS,
+    SCOPE_OPTIONS, scope_code_for_text,
 )
 from id_utils import generate_time_based_id
 from little_gucci import create_verified_ssl_context
@@ -63,15 +64,6 @@ STATUS_OPTIONS = [
     ("Yellow", STATUS_YELLOW),
     ("Red", STATUS_RED),
     ("Unknown", STATUS_UNKNOWN),
-]
-
-# Scope options
-SCOPE_OPTIONS = [
-    ("My Location", "1"),
-    ("My Community", "2"),
-    ("My County", "3"),
-    ("My Region", "4"),
-    ("Other Location", "5"),
 ]
 
 # Status categories in display order (label, internal_name)
@@ -1034,7 +1026,8 @@ class StatRepDialog(QDialog):
 
         scope_text = (data.get("scope") or "").strip()
         if scope_text and hasattr(self, 'scope_combo'):
-            idx = self.scope_combo.findText(scope_text)
+            code = scope_code_for_text(scope_text)
+            idx = self.scope_combo.findData(code) if code else -1
             if idx >= 0:
                 self.scope_combo.setCurrentIndex(idx)
 

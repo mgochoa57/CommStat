@@ -232,8 +232,8 @@ pick one &mdash; is where your saved filters live.</p>
 <h3 style="color:#555555;">Good to know</h3>
 <ul>
 <li>While <b>Map</b> or <b>Custom</b> is on, your Filter menu group checkboxes,
-    <b>Hide Green Pins</b> and <b>Hide Internet Feed</b> are <b>ignored</b>.
-    Switch back to <b>Off</b> to use them again.</li>
+    <b>Hide Green Pins</b>, <b>Hide All Pins</b>, and <b>Hide Internet Feed</b>
+    are <b>ignored</b>. Switch back to <b>Off</b> to use them again.</li>
 <li>Anything you type in the Custom boxes is remembered while CommStat is
     running, so you can switch modes and come back to it. It clears when you
     restart &mdash; <b>saved</b> filters do not, they are always there.</li>
@@ -250,55 +250,68 @@ def show_map_filter_help(parent=None, **colors) -> None:
                      _MAP_FILTER_HTML, width=720, **colors)
 
 
-# ── Filter menu ▸ Group Member Pins ▸ Help ─────────────────────────────────────
+# ── Map menu ▸ Watchlist Overlay ▸ Help ────────────────────────────────────────
 
-_MEMBER_PINS_HTML = """
+_WATCHLIST_PINS_HTML = """
 <div style="font-family: Roboto; font-size: 13px; color: #333333;">
 
-<p><b>Group Member Pins</b> puts a
-<span style="color:#e83e8c;"><b>pink halo pin</b></span> on the map for every
-member of a group &mdash; whether or not they have ever sent a status report.
-It is made for group and net leaders who need to see <i>where their people
-are</i>, not just who has reported in.</p>
+<p>A <b>Watchlist</b> is a named list of callsigns or simple names that puts an
+<span style="color:#e83e8c;"><b>object</b></span> on the map for every
+entry. It is made for anybody that wants to view callsigns or locations of 
+interest. Group and net leaders can see on the map <i>where their people are</i>,
+not just who has reported in.</p>
+
+<p>Watchlists are <b>separate from Groups</b>. Groups name the JS8
+<b>@GROUP</b> targets your station listens for; a watchlist is just a map
+overlay and never affects which messages you receive.</p>
+
+<p>Each watchlist has its own <b>Object Color</b> (Yellow, Orange, Pink, Purple or Blue) and
+<b>Object Shape</b> (Circle, Square, or Triangle), set in
+<b>Config &rarr; Manage Watchlists</b>. With five colors and three shapes you
+can give up to fifteen watchlists a distinct look on the same map.</p>
 
 <p style="background-color:#FFF6DA; padding:8px;">
-<b>Member pins never expire.</b> They ignore the date range, the group
-checkboxes, Hide Green Pins, Hide Internet Feed, and the Map Filter. Once a
+<b>Watchlist objects never expire.</b> They ignore the date range, the group
+checkboxes, Hide Green Pins, Hide All Pins, Hide Internet Feed, and the Map
+Filter. Once a
 member is on the map, they stay on the map until you remove them from the
-group or uncheck the group here.</p>
+watchlist or uncheck the watchlist checkbox in the map menu.</p>
 
 <hr>
 
-<h3 style="color:#e83e8c;">Turning pins on and off</h3>
+<h3 style="color:#e83e8c;">Turning objects on and off</h3>
 <ul>
-<li>Under <b>Filter &rarr; Group Member Pins</b> you will see one checkbox per
-    group &mdash; but <b>only groups that have members</b> are listed. A group
-    you have not added members to yet will not appear.</li>
-<li>Check a group and its members appear on the map right away; uncheck it and
-    they disappear. Your choices are remembered between sessions.</li>
+<li>Under <b>Map &rarr; Watchlist Overlay</b> you will see one checkbox per
+    watchlist &mdash; but <b>only watchlists that have members</b> are listed.
+    A watchlist you have not added members to yet will not appear.</li>
+<li>Check a watchlist and its members appear on the map right away; uncheck it
+    and they disappear. Your choices are remembered between sessions.</li>
 </ul>
 
 <hr>
 
-<h3 style="color:#e83e8c;">Reading the pins</h3>
+<h3 style="color:#e83e8c;">Reading the map objects</h3>
 <ul>
-<li>A member pin is a soft <span style="color:#e83e8c;"><b>pink circle with no
-    solid center</b></span>, so you can tell it apart from live status report
-    pins at a glance.</li>
-<li><b>Hover over a pin to see the member's callsign.</b></li>
-<li>Status report pins always draw <b>on top</b> of member pins &mdash; when a
-    member sends a report, their live pin covers the halo.</li>
+<li>A watchlist object is a semi-translucent shape with no solid
+    center &mdash; in the watchlist's <b>Object Color</b> and <b>Object Shape</b>, so
+    you can tell it apart from live status report pins (and from other
+    watchlists' members) at a glance.</li>
+<li><b>Hover over an object to see the member's callsign or name.</b> Click it
+    to open the QRZ Lookup window for that member.</li>
+<li>Status report pins always draw <b>on top</b> of watchlist objects &mdash; when
+    a member sends a report, their live pin covers the object.</li>
 <li>Members are placed by their grid square (or exact location when QRZ.com
     provides one). A member with no grid on file draws no pin.</li>
 </ul>
 
 <hr>
 
-<h3 style="color:#e83e8c;">Adding members to a group</h3>
+<h3 style="color:#e83e8c;">Adding members to a watchlist</h3>
 <ol>
-<li>Open <b>Config &rarr; Manage Groups</b>, click a group, then click
-    <b>Members</b>. The Members column shows how many each group has.</li>
-<li>Click <b>Add</b>, type a callsign, and click <b>Search</b>.</li>
+<li>Open <b>Config &rarr; Manage Watchlists</b>, click a watchlist, then click
+    <b>Members</b>. The Members column shows how many each watchlist has.</li>
+<li>Click <b>Add</b>, type a callsign, and click <b>Search</b> &mdash; or click
+    <b>Bulk Add</b> and paste a whole comma-separated list at once.</li>
 <li>CommStat checks your <b>local contact database</b> first. If the callsign
     is not there and your QRZ.com subscription is set up
     (Config &rarr; QRZ Settings), it looks the callsign up on
@@ -309,17 +322,34 @@ group or uncheck the group here.</p>
     callsign right away.</li>
 </ol>
 
+<p style="background-color:#FDEEF5; padding:8px;">
+<b>It does not have to be a callsign.</b> Suppose you want to enter nuclear
+power plants. You simply enter the name &mdash; Fermi, Palo Verde, or Diablo
+Canyon &mdash; and click the <b>Search</b> button. A lookup for the callsign
+will fail, since there isn't one, but you can then enter the gridsquare
+yourself and click the <b>Save</b> button. You can also add friends, family,
+taco stands, or doughnut shops &mdash; anything you want to see on the map.</p>
+
+<p style="background-color:#EAF2FA; padding:8px;">
+<b>Wrong location?</b> Callsign locations come from FCC records, and people
+move. If a member's grid square is out of date, run their callsign through
+<b>Add</b> again and simply type the correct grid before clicking Save &mdash;
+the <b>Grid</b> box is always editable. Your correction sticks, even when the
+QRZ.com data is refreshed later.</p>
+
 <p style="background-color:#F0F7F1; padding:8px;">
 <b>Example.</b> A HUB leader adds all of their region's callsigns to a
-HUB4 group, then checks <b>HUB4</b> under Group Member Pins. Every member shows
-as a pink halo. As members send status reports, live pins appear on top of the
-halos &mdash; making it easy to see who has checked in and who has not.</p>
+HUB4 watchlist, then checks <b>HUB4</b> under Watchlist Overlay. Every member
+shows as an object in the watchlist's color and shape &mdash; say a pink circle
+for HUB4 and a blue triangle for a second watchlist. As members send status
+reports, live pins appear on top of the objects &mdash; making it easy to see who
+has checked in and who has not.</p>
 
 </div>
 """
 
 
-def show_member_pins_help(parent=None, **colors) -> None:
-    """Explain the Filter menu's Group Member Pins section."""
-    show_help_dialog(parent, "Group Member Pins",
-                     _MEMBER_PINS_HTML, width=560, **colors)
+def show_watchlist_pins_help(parent=None, **colors) -> None:
+    """Explain the Map menu's Watchlist Overlay section."""
+    show_help_dialog(parent, "Watchlist Overlay",
+                     _WATCHLIST_PINS_HTML, width=560, **colors)

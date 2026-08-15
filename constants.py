@@ -96,6 +96,30 @@ DEFAULT_COLORS: Dict[str, str] = {
 }
 
 # =============================================================================
+# Watchlist objects (map overlay)
+# =============================================================================
+
+# Display name -> hex. The friendly names are what users see and what the
+# watchlists table stores.
+WATCHLIST_OBJECT_COLORS: Dict[str, str] = {
+    'YELLOW': '#ffff00',
+    'ORANGE': '#f07800',
+    'PINK':   '#ff66ff',
+    'PURPLE': '#8000ff',
+    'BLUE':   '#6666FF',
+
+}
+WATCHLIST_OBJECT_SHAPES = ['CIRCLE', 'SQUARE', 'TRIANGLE']
+DEFAULT_OBJECT_COLOR = 'PINK'
+DEFAULT_OBJECT_SHAPE = 'CIRCLE'
+
+
+#'PINK':  '#e83e8c',
+#'BLUE':  '#336699',
+#'GREEN': '#20c997',
+
+
+# =============================================================================
 # Filter / Map / Slideshow
 # =============================================================================
 
@@ -128,6 +152,92 @@ STATREP_HEADERS = [
     "Powr", "H2O", "Med", "Comm", "Trvl", "Inet", "Fuel", "Food",
     "Crime", "Civil", "Pol", "Remarks"
 ]
+
+# =============================================================================
+# StatRep Scope (old/new label compatibility)
+# =============================================================================
+# The wire/DB representation is always a single digit code ("1"-"5"); the
+# combo box + DB + RF/commsrvr text is the display string for that code.
+# A future update renames codes 1-4 and retires code 5 (no successor, but
+# it must stay decodable forever since old DB rows / other stations' RF
+# traffic may still send it).
+#
+# To ship the rename: flip SCOPE_USE_NEW_LABELS to True. Everything that
+# picks display text (SCOPE_OPTIONS, scope_text_for_code) follows
+# automatically. Everything that resolves existing/incoming text back to a
+# code (scope_code_for_text, SCOPE_RADIUS) already understands both label
+# sets, so no other edit is required.
+SCOPE_USE_NEW_LABELS = False  # flip to True when the rename ships
+
+SCOPE_CODE_TO_TEXT_OLD = {
+    "1": "My Location",
+    "2": "My Community",
+    "3": "My County",
+    "4": "My Region",
+    "5": "Other Location",
+}
+
+# Code "5" has no successor; intentionally absent so it drops out of the
+# combo box once active, while remaining decodable via the OLD map fallback.
+SCOPE_CODE_TO_TEXT_NEW = {
+    "1": "My QTH",
+    "2": "Community",
+    "3": "County",
+    "4": "Region",
+}
+
+SCOPE_CODE_TO_TEXT = SCOPE_CODE_TO_TEXT_NEW if SCOPE_USE_NEW_LABELS else SCOPE_CODE_TO_TEXT_OLD
+
+# Codes no longer offered as a picker choice, but still decodable from
+# legacy DB rows / incoming RF traffic (see scope_text_for_code's fallback).
+# "Other Location" (5) is dropped now, ahead of the full label rename.
+SCOPE_RETIRED_CODES = {"5"}
+
+# (display, code) pairs for building the Scope QComboBox.
+SCOPE_OPTIONS = [
+    (text, code) for code, text in SCOPE_CODE_TO_TEXT.items()
+    if code not in SCOPE_RETIRED_CODES
+]
+
+# Reverse lookup covering BOTH label sets, so stored/incoming text resolves
+# to its code regardless of which set produced it.
+SCOPE_TEXT_TO_CODE = {}
+for _code, _text in SCOPE_CODE_TO_TEXT_OLD.items():
+    SCOPE_TEXT_TO_CODE[_text] = _code
+for _code, _text in SCOPE_CODE_TO_TEXT_NEW.items():
+    SCOPE_TEXT_TO_CODE[_text] = _code
+del _code, _text
+
+
+def scope_code_for_text(text: str) -> str:
+    """Display text (old OR new label set) -> digit code. "" if unrecognized."""
+    return SCOPE_TEXT_TO_CODE.get((text or "").strip(), "")
+
+
+def scope_text_for_code(code: str) -> str:
+    """Digit code -> current display text. Falls back to the retired OLD
+    text for any code the active set no longer defines. "Unknown" if invalid."""
+    return SCOPE_CODE_TO_TEXT.get(code, SCOPE_CODE_TO_TEXT_OLD.get(code, "Unknown"))
+
+
+# Map-pin radius (px) by scope CODE, so both label sets resolve consistently.
+SCOPE_RADIUS_BY_CODE = {
+    "1": 3,
+    "2": 10,
+    "3": 16,
+    "4": 24,
+    "5": 16,  # "Other Location" — retired but historic rows still carry it
+}
+SCOPE_RADIUS_DEFAULT = 3  # unknown/missing scope, treated like "My Location"/"My QTH"
+
+# Back-compat TEXT-keyed view built from BOTH label sets, since map rows key
+# off whatever raw text is stored in the DB (old rows keep old text forever).
+SCOPE_RADIUS = {}
+for _code, _text in SCOPE_CODE_TO_TEXT_OLD.items():
+    SCOPE_RADIUS[_text] = SCOPE_RADIUS_BY_CODE[_code]
+for _code, _text in SCOPE_CODE_TO_TEXT_NEW.items():
+    SCOPE_RADIUS[_text] = SCOPE_RADIUS_BY_CODE[_code]
+del _code, _text
 
 # =============================================================================
 # Console Colors (ANSI)

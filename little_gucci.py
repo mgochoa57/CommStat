@@ -111,17 +111,10 @@ MAP_WHEEL_PX_PER_ZOOM = 360
 
 # Bottom-left map pin sizing. Pin COLOR conveys status (green/orange/red);
 # pin RADIUS conveys the StatRep's scope (how local the report is). Values are
-# CircleMarker pixel radii, so on-screen diameter is 2x these numbers. Keys match
-# the scope strings stored in the DB (see SCOPE_MAP in map_f301_digits_to_fields).
-SCOPE_RADIUS = {
-    "My Location":     3,
-    "My Community":   10,
-    "My County":      16,
-    "My Region":      24,
-    "Other Location": 16,
-}
-# Fallback radius for an unknown/missing scope (treated like My Location).
-SCOPE_RADIUS_DEFAULT = 3
+# CircleMarker pixel radii, so on-screen diameter is 2x these numbers.
+# SCOPE_RADIUS / SCOPE_RADIUS_DEFAULT come from constants.py (imported above
+# via `from constants import *`) and understand both the old and future scope
+# label sets.
 
 # Contacts capture (Direct Message Part 1):
 #  - The sender of the RX.DIRECTED (from_call) is the RELAY — the station we
@@ -510,14 +503,7 @@ def map_f301_digits_to_fields(digits: str) -> dict:
     Returns dict with: scope, power, water, telecom, internet, and comment parts
     """
     # Scope mapping
-    SCOPE_MAP = {
-        "1": "My Location",
-        "2": "My Community",
-        "3": "My County",
-        "4": "My Region",
-        "5": "Other Location"
-    }
-    scope = SCOPE_MAP.get(digits[0], "Unknown")
+    scope = scope_text_for_code(digits[0])
 
     # Remaining 8 digits follow F!304 format
     f304_fields = map_f304_digits_to_fields(digits[1:])
@@ -1012,11 +998,11 @@ class CustomWebEnginePage(QWebEnginePage):
                 self.parent_widget._on_map_filter_set(state)
             return False
 
-        # Handle member pin clicks: commstat://member-pin/{callsign}
-        if url.host() == "member-pin":
+        # Handle watchlist pin clicks: commstat://watchlist-pin/{callsign}
+        if url.host() == "watchlist-pin":
             callsign = url.path().lstrip("/")
-            if hasattr(self.parent_widget, '_on_member_pin_clicked'):
-                self.parent_widget._on_member_pin_clicked(callsign)
+            if hasattr(self.parent_widget, '_on_watchlist_pin_clicked'):
+                self.parent_widget._on_watchlist_pin_clicked(callsign)
             return False
 
         # Open USGS earthquake event links in the user's browser.
@@ -1141,7 +1127,7 @@ class ConfigManager:
                 'earthquake_min_mag': 2.5,
                 'earthquake_region': 'Worldwide',
                 'earthquake_refresh': 10,
-                'member_pin_groups': '',
+                'shown_watchlists': '',
                 'font_family': 'Segoe UI',
                 'font_size': 9,
             }
@@ -1183,7 +1169,7 @@ class ConfigManager:
                 'earthquake_min_mag':     config.getfloat("DIRECTEDCONFIG", "earthquake_min_mag",     fallback=2.5),
                 'earthquake_region':      config.get("DIRECTEDCONFIG", "earthquake_region",      fallback="Worldwide"),
                 'earthquake_refresh':     config.getint("DIRECTEDCONFIG", "earthquake_refresh",     fallback=10),
-                'member_pin_groups':      config.get("DIRECTEDCONFIG", "member_pin_groups",      fallback=""),
+                'shown_watchlists':       config.get("DIRECTEDCONFIG", "shown_watchlists",       fallback=""),
                 'map_theme':              config.get("DIRECTEDCONFIG", "map_theme",              fallback='dark'),
             }
         else:
@@ -1204,7 +1190,7 @@ class ConfigManager:
                 'earthquake_min_mag': 2.5,
                 'earthquake_region': 'Worldwide',
                 'earthquake_refresh': 10,
-                'member_pin_groups': '',
+                'shown_watchlists': '',
                 'map_theme': 'dark',
             }
 
@@ -1422,13 +1408,13 @@ class ConfigManager:
     def set_earthquake_min_mag(self, value: float) -> None:
         self._save_setting('earthquake_min_mag', value)
 
-    def get_member_pin_groups(self) -> List[str]:
-        """Group names whose member pins are shown on the map."""
-        raw = self.directed_config.get('member_pin_groups', '')
-        return [g for g in raw.split(',') if g]
+    def get_shown_watchlists(self) -> List[str]:
+        """Watchlist names whose member pins are shown on the map."""
+        raw = self.directed_config.get('shown_watchlists', '')
+        return [w for w in raw.split(',') if w]
 
-    def set_member_pin_groups(self, groups: List[str]) -> None:
-        self._save_setting('member_pin_groups', ','.join(groups))
+    def set_shown_watchlists(self, watchlists: List[str]) -> None:
+        self._save_setting('shown_watchlists', ','.join(watchlists))
 
     def get_earthquake_region(self) -> str:
         return self.directed_config.get('earthquake_region', 'Worldwide')
@@ -2063,7 +2049,7 @@ class DatabaseManager:
                     "comment": row[1] or "",
                     "url1": row[2] or "",
                     "url2": row[3] or "",
-                    "date_added": row[4] or ""
+                    "date_added": row[4] or "",
                 }
                 for row in cursor.fetchall()
             ]
@@ -2072,16 +2058,6 @@ class DatabaseManager:
     def remove_group(self, group_name: str) -> bool:
         """Remove a group. Returns True if successful."""
         def op(cursor, conn):
-            try:
-                cursor.execute(
-                    "DELETE FROM groupMembers WHERE group_id = "
-                    "(SELECT id FROM groups WHERE name = ?)",
-                    (group_name.upper(),)
-                )
-            except sqlite3.Error:
-                # groupMembers table may not exist yet; the group delete must
-                # keep working regardless.
-                pass
             cursor.execute("DELETE FROM groups WHERE name = ?", (group_name.upper(),))
             conn.commit()
             return cursor.rowcount > 0
@@ -2094,33 +2070,118 @@ class DatabaseManager:
             return cursor.fetchone()[0]
         return self._execute(op, 0)
 
-    def get_group_id(self, group_name: str) -> Optional[int]:
-        """Get a group's id by name, or None if not found."""
+    # ── Watchlists ─────────────────────────────────────────────────────────
+    # A watchlist is a named list of qrz contacts drawn on the map as
+    # persistent halo pins. Independent of the JS8 @GROUPS used for message
+    # routing. Methods that read the watchlist tables degrade gracefully
+    # (empty/False) on a DB that predates them.
+
+    def get_all_watchlists_details(self) -> List[Dict]:
+        """Get full details of all watchlists, sorted by name."""
         def op(cursor, conn):
-            cursor.execute("SELECT id FROM groups WHERE name = ?", (group_name.strip().upper(),))
+            cursor.execute(
+                "SELECT name, comment, object_color, object_shape FROM watchlists ORDER BY name"
+            )
+            return [
+                {
+                    "name": row[0],
+                    "comment": row[1] or "",
+                    "object_color": row[2] or DEFAULT_OBJECT_COLOR,
+                    "object_shape": row[3] or DEFAULT_OBJECT_SHAPE,
+                }
+                for row in cursor.fetchall()
+            ]
+        return self._execute(op, [])
+
+    def get_all_watchlists(self) -> List[str]:
+        """Get all watchlist names, sorted."""
+        def op(cursor, conn):
+            cursor.execute("SELECT name FROM watchlists ORDER BY name")
+            return [row[0] for row in cursor.fetchall()]
+        return self._execute(op, [])
+
+    def add_watchlist(self, name: str, comment: str = "",
+                      object_color: str = DEFAULT_OBJECT_COLOR,
+                      object_shape: str = DEFAULT_OBJECT_SHAPE) -> bool:
+        """Add a new watchlist. Returns False on duplicate name."""
+        name = name.strip().upper()
+        if not name:
+            return False
+        try:
+            with sqlite3.connect(self.db_path, timeout=10) as connection:
+                cursor = connection.cursor()
+                cursor.execute(
+                    "INSERT INTO watchlists (name, comment, object_color, object_shape, date_added) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (name, comment.strip(), object_color, object_shape,
+                     datetime.now().strftime("%Y-%m-%d"))
+                )
+                connection.commit()
+                return True
+        except sqlite3.IntegrityError:
+            # Duplicate name
+            return False
+        except sqlite3.Error as error:
+            print(f"Database error: {error}")
+            return False
+
+    def update_watchlist(self, old_name: str, new_name: str, comment: str = "",
+                         object_color: str = DEFAULT_OBJECT_COLOR,
+                         object_shape: str = DEFAULT_OBJECT_SHAPE) -> bool:
+        """Rename a watchlist and update its comment and object style."""
+        def op(cursor, conn):
+            cursor.execute(
+                "UPDATE watchlists SET name = ?, comment = ?, object_color = ?, object_shape = ? "
+                "WHERE name = ?",
+                (new_name.strip().upper(), comment.strip(), object_color, object_shape,
+                 old_name.strip().upper())
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        return self._execute(op, False)
+
+    def remove_watchlist(self, name: str) -> bool:
+        """Remove a watchlist and its member list. qrz contacts are untouched."""
+        def op(cursor, conn):
+            cursor.execute(
+                "DELETE FROM watchlistMembers WHERE watchlist_id = "
+                "(SELECT id FROM watchlists WHERE name = ?)",
+                (name.strip().upper(),)
+            )
+            cursor.execute("DELETE FROM watchlists WHERE name = ?", (name.strip().upper(),))
+            conn.commit()
+            return cursor.rowcount > 0
+        return self._execute(op, False)
+
+    def get_watchlist_id(self, name: str) -> Optional[int]:
+        """Get a watchlist's id by name, or None if not found."""
+        def op(cursor, conn):
+            cursor.execute("SELECT id FROM watchlists WHERE name = ?", (name.strip().upper(),))
             row = cursor.fetchone()
             return row[0] if row else None
         return self._execute(op, None)
 
-    def get_group_member_counts(self) -> Dict[str, int]:
-        """Get member counts keyed by group name. Groups without members count 0."""
+    def get_watchlist_member_counts(self) -> Dict[str, int]:
+        """Get member counts keyed by watchlist name. Empty watchlists count 0."""
         def op(cursor, conn):
             cursor.execute(
-                "SELECT g.name, COUNT(gm.id) FROM groups g "
-                "LEFT JOIN groupMembers gm ON gm.group_id = g.id "
-                "GROUP BY g.id"
+                "SELECT w.name, COUNT(wm.id) FROM watchlists w "
+                "LEFT JOIN watchlistMembers wm ON wm.watchlist_id = w.id "
+                "GROUP BY w.id"
             )
             return {row[0]: row[1] for row in cursor.fetchall()}
         return self._execute(op, {})
 
-    def get_group_members(self, group_id: int) -> List[Dict]:
-        """Get a group's members joined with their qrz contact details."""
+    def get_watchlist_members(self, watchlist_id: int) -> List[Dict]:
+        """Get a watchlist's members joined with their qrz contact details.
+        The grid column shows the operator's grid_override when one is set."""
         def op(cursor, conn):
             cursor.execute(
-                "SELECT q.id, q.callsign, q.name, q.city, q.state, q.grid "
-                "FROM groupMembers gm JOIN qrz q ON q.id = gm.member_id "
-                "WHERE gm.group_id = ? ORDER BY q.callsign",
-                (group_id,)
+                "SELECT q.id, q.callsign, q.name, q.city, q.state, "
+                "COALESCE(NULLIF(q.grid_override, ''), q.grid) "
+                "FROM watchlistMembers wm JOIN qrz q ON q.id = wm.member_id "
+                "WHERE wm.watchlist_id = ? ORDER BY q.callsign",
+                (watchlist_id,)
             )
             return [
                 {
@@ -2135,14 +2196,14 @@ class DatabaseManager:
             ]
         return self._execute(op, [])
 
-    def add_group_member(self, group_id: int, member_id: int) -> bool:
-        """Add a qrz contact to a group. Returns False if already a member."""
+    def add_watchlist_member(self, watchlist_id: int, member_id: int) -> bool:
+        """Add a qrz contact to a watchlist. Returns False if already a member."""
         try:
             with sqlite3.connect(self.db_path, timeout=10) as connection:
                 cursor = connection.cursor()
                 cursor.execute(
-                    "INSERT INTO groupMembers (group_id, member_id) VALUES (?, ?)",
-                    (group_id, member_id)
+                    "INSERT INTO watchlistMembers (watchlist_id, member_id) VALUES (?, ?)",
+                    (watchlist_id, member_id)
                 )
                 connection.commit()
                 return True
@@ -2153,12 +2214,25 @@ class DatabaseManager:
             print(f"Database error: {error}")
             return False
 
-    def remove_group_member(self, group_id: int, member_id: int) -> bool:
-        """Remove a qrz contact from a group. The qrz row itself is untouched."""
+    def remove_watchlist_member(self, watchlist_id: int, member_id: int) -> bool:
+        """Remove a qrz contact from a watchlist. The qrz row itself is untouched."""
         def op(cursor, conn):
             cursor.execute(
-                "DELETE FROM groupMembers WHERE group_id = ? AND member_id = ?",
-                (group_id, member_id)
+                "DELETE FROM watchlistMembers WHERE watchlist_id = ? AND member_id = ?",
+                (watchlist_id, member_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        return self._execute(op, False)
+
+    def set_qrz_grid_override(self, callsign: str, grid: str) -> bool:
+        """Set (or clear, with '') a contact's grid override. Lives in its own
+        qrz column so QRZ.com API refreshes never overwrite it — same
+        mechanism as the memo column."""
+        def op(cursor, conn):
+            cursor.execute(
+                "UPDATE qrz SET grid_override = ? WHERE callsign = ?",
+                (grid.strip(), callsign.strip().upper())
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -2197,20 +2271,22 @@ class DatabaseManager:
                 return row[0] if row else None
         return self._execute(op, None)
 
-    def get_member_pins(self, group_names: List[str]) -> List[Tuple]:
-        """Get (callsign, lat, lon, grid) for the members of the named groups,
-        one row per callsign. The joins drop members whose group or qrz
-        contact was deleted."""
-        if not group_names:
+    def get_watchlist_pins(self, watchlist_names: List[str]) -> List[Tuple]:
+        """Get (callsign, lat, lon, grid, grid_override, object_color, object_shape)
+        for the members of the named watchlists. A callsign on two shown
+        watchlists with different object styles returns one row per style. The
+        joins drop members whose watchlist or qrz contact was deleted."""
+        if not watchlist_names:
             return []
         def op(cursor, conn):
-            placeholders = ",".join("?" * len(group_names))
+            placeholders = ",".join("?" * len(watchlist_names))
             cursor.execute(
-                "SELECT DISTINCT q.callsign, q.lat, q.lon, q.grid "
-                "FROM groupMembers gm "
-                "JOIN qrz q ON q.id = gm.member_id "
-                f"JOIN groups g ON g.id = gm.group_id AND g.name IN ({placeholders})",
-                group_names
+                "SELECT DISTINCT q.callsign, q.lat, q.lon, q.grid, q.grid_override, "
+                "w.object_color, w.object_shape "
+                "FROM watchlistMembers wm "
+                "JOIN qrz q ON q.id = wm.member_id "
+                f"JOIN watchlists w ON w.id = wm.watchlist_id AND w.name IN ({placeholders})",
+                watchlist_names
             )
             return cursor.fetchall()
         return self._execute(op, [])
@@ -2303,13 +2379,13 @@ class DatabaseManager:
         def op(cursor, conn):
             try:
                 cursor.execute(
-                    "DELETE FROM groupMembers WHERE member_id = "
+                    "DELETE FROM watchlistMembers WHERE member_id = "
                     "(SELECT id FROM qrz WHERE callsign = ?)",
                     (callsign,)
                 )
             except sqlite3.Error:
-                # groupMembers table may not exist yet; the contact delete must
-                # keep working regardless.
+                # watchlistMembers table may not exist yet; the contact delete
+                # must keep working regardless.
                 pass
             cursor.execute("DELETE FROM qrz WHERE callsign = ?", (callsign,))
             conn.commit()
@@ -2555,10 +2631,11 @@ class _MenuBarMenu(QtWidgets.QMenu):
 
 
 class _PersistentCheckMenu(_MenuBarMenu):
-    """Filter menu variant that stays open when a checkable item (group
-    filters, Hide Green Pins, etc.) is clicked, so several can be toggled
-    without reopening the menu each time. Non-checkable actions (e.g. the
-    date-range presets) still close the menu as normal."""
+    """Menu bar dropdown variant that stays open when a checkable item (group
+    filters, Hide Green Pins, Weather Radar, Watchlist Overlay entries, etc.)
+    is clicked, so several can be toggled without reopening the menu each
+    time. Non-checkable actions (e.g. the date-range presets) still close the
+    menu as normal. Used by the Filter and Map menus."""
 
     def mouseReleaseEvent(self, event):
         action = self.activeAction()
@@ -2852,6 +2929,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hide_live_feed: bool = False          # Session-only; resets on restart
         self._hide_internet_statrep: bool = self.config.get_hide_internet_feed()
         self._hide_green_pins: bool = False         # Session-only; resets on restart
+        self._hide_all_pins: bool = False           # Session-only; resets on restart
         self._map_filter_state: str = "off"         # Session-only; resets on restart. One of: off, map, custom
         self._map_bounds: Optional[Tuple[float, float, float, float]] = None  # (south, west, north, east); only set while _map_filter_state == "map"
         self._custom_filter_mode: str = "or"         # Session-only; joins the Custom Filtering boxes. One of: and, or
@@ -3061,7 +3139,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Populate the Groups menu and filter menu group checkboxes
         self._populate_groups_menu()
         self._populate_filter_groups_menu()
-        self._populate_member_pins_menu()
+        self._populate_watchlist_pins_menu()
 
         # Load initial data
         self._load_statrep_data()
@@ -3287,6 +3365,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._check_commsrvr()  # Send first heartbeat immediately
                 self.commsrvr_timer.start(HEARTBEAT_INTERVAL_MS)
             QTimer.singleShot(HEARTBEAT_DELAY_MS, start_commsrvr_heartbeat)
+
+            # Re-enable the internet-gated map overlay menu items, which were
+            # disabled at startup/menu-build time because there was no
+            # connection yet — without this they stay grayed out for the
+            # rest of the session even after connectivity returns.
+            self._sync_weather_radar_action()
+            self._sync_earthquake_action()
+            self._restart_radar_refresh_timer()
+            if self.config.get_weather_radar() or self.config.get_earthquake_layer():
+                self._save_map_position(callback=self._load_map)
         elif not self._internet_available:
             print("Internet connectivity: Still not available (will retry in 30 minutes)")
 
@@ -3437,11 +3525,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Define menu actions: (name, text, handler)
         menu_items = [
-            ("user_settings",  "User Settings",  self._on_user_settings),
-            ("manage_groups",  "Manage Groups",   self._on_manage_groups),
-            ("js8_connectors", "JS8 Connectors",  self._on_js8_connectors),
+            ("user_settings",     "User Settings",     self._on_user_settings),
+            ("manage_groups",     "Manage Groups",     self._on_manage_groups),
+            ("js8_connectors",    "JS8 Connectors",    self._on_js8_connectors),
             ("qrz_enable",     "QRZ Settings",    self._on_qrz_enable),
             ("sound_settings", "Sound Settings",  self._on_sound_settings),
+            ("manage_watchlists", "Manage Watchlists", self._on_manage_watchlists),
         ]
 
         # Create actions for dropdown menu
@@ -3454,7 +3543,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions[name] = action
 
         self.groups_menu = self.menu
-        self.groups_menu.addSeparator()
 
         # ALERTS, MESSAGES & VIDEOS section (moved here from the Filter menu)
         alerts_messages_label = QtWidgets.QAction("Alerts, Msgs && Videos", self)
@@ -3504,7 +3592,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.transmit_menu.addAction(action)
             self.actions[name] = action
 
-        self.transmit_menu.addSeparator()
         internet_lbl = QtWidgets.QAction("Internet Tools", self)
         internet_lbl.setEnabled(False)
         self.transmit_menu.addAction(internet_lbl)
@@ -3519,7 +3606,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.transmit_menu.addAction(share_video_action)
         self.actions["share_video"] = share_video_action
 
-        self.transmit_menu.addSeparator()
         section_lbl = QtWidgets.QAction("Grid Down Tools", self)
         section_lbl.setEnabled(False)
         self.transmit_menu.addAction(section_lbl)
@@ -3558,7 +3644,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
         # LIVE FEED section
-        self.filter_menu.addSeparator()
         live_feed_label = QtWidgets.QAction("Live Feed", self)
         live_feed_label.setEnabled(False)  # Disabled as a section title
         self.filter_menu.addAction(live_feed_label)
@@ -3576,7 +3661,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filter_menu.addAction(self.hide_live_feed_action)
 
         # STATREP & MESSAGES section
-        self.filter_menu.addSeparator()
         statrep_messages_label = QtWidgets.QAction("Status Reports", self)
         statrep_messages_label.setEnabled(False)  # Disabled as a section title
         self.filter_menu.addAction(statrep_messages_label)
@@ -3593,6 +3677,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hide_green_pins_action.triggered.connect(self._on_toggle_hide_green_pins)
         self.filter_menu.addAction(self.hide_green_pins_action)
 
+        self.hide_all_pins_action = QtWidgets.QAction("Hide All Pins", self)
+        self.hide_all_pins_action.setCheckable(True)
+        self.hide_all_pins_action.setChecked(False)
+        self.hide_all_pins_action.triggered.connect(self._on_toggle_hide_all_pins)
+        self.filter_menu.addAction(self.hide_all_pins_action)
+
         # Per-group checkboxes are inserted here dynamically after DB is ready
         self.filter_group_actions: Dict[str, QtWidgets.QAction] = {}
 
@@ -3602,21 +3692,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_every_group_action.triggered.connect(self._on_toggle_show_every_group)
         self.filter_menu.addAction(self.show_every_group_action)
 
-        # GROUP MEMBER PINS section — one checkbox per group that has members,
-        # inserted dynamically by _populate_member_pins_menu above the Help item.
-        self.filter_menu.addSeparator()
-        member_pins_label = QtWidgets.QAction("Group Member Pins", self)
-        member_pins_label.setEnabled(False)  # Disabled as a section title
-        self.filter_menu.addAction(member_pins_label)
-
-        self.member_pin_group_actions: Dict[str, QtWidgets.QAction] = {}
-
-        self.member_pins_help_action = QtWidgets.QAction("Help", self)
-        self.member_pins_help_action.triggered.connect(self._on_member_pins_help)
-        self.filter_menu.addAction(self.member_pins_help_action)
-
         # Map theme menu
-        self.map_theme_menu = _MenuBarMenu("Map", self.menubar)
+        self.map_theme_menu = _PersistentCheckMenu("Map", self.menubar)
         self.menubar.addMenu(self.map_theme_menu)
 
         map_overlay_label = QtWidgets.QAction("Map Overlay Options", self)
@@ -3684,6 +3761,18 @@ class MainWindow(QtWidgets.QMainWindow):
             action.triggered.connect(lambda checked=False, m=minutes: self._set_earthquake_refresh(m))
             self.map_eq_refresh_menu.addAction(action)
             self.map_eq_refresh_actions[minutes] = action
+
+        # WATCHLIST OVERLAY section — one checkbox per watchlist that has members,
+        # inserted dynamically by _populate_watchlist_pins_menu above the Help item.
+        watchlist_pins_label = QtWidgets.QAction("Watchlist Overlay", self)
+        watchlist_pins_label.setEnabled(False)  # Disabled as a section title
+        self.map_theme_menu.addAction(watchlist_pins_label)
+
+        self.watchlist_pin_actions: Dict[str, QtWidgets.QAction] = {}
+
+        self.watchlist_pins_help_action = QtWidgets.QAction("Help", self)
+        self.watchlist_pins_help_action.triggered.connect(self._on_watchlist_pins_help)
+        self.map_theme_menu.addAction(self.watchlist_pins_help_action)
 
         map_theme_label = QtWidgets.QAction("Map Theme Options", self)
         map_theme_label.setEnabled(False)
@@ -3773,6 +3862,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Menubar items
         create_action(self.menubar, "QRZ", "qrz_lookup", self._on_qrz_lookup)
+        create_action(self.menubar, "Reports", "reports", self._on_reports)
         create_action(self.menubar, "Help", "help", self._on_help)
         create_action(self.menubar, "Exit" + " " * 10, "exit", qApp.quit)
         create_action(self.menubar, "What's New" + " " * 10, "whats_new", self._on_whats_new)
@@ -5511,7 +5601,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Map digits to fields
         if format_code == "F!304":
             field_map = map_f304_digits_to_fields(digits)
-            scope = "My Location"
+            scope = scope_text_for_code("1")  # F!304 carries no scope digit; always the reporter's own location
             status_digits = digits
         else:  # F!301
             field_map = map_f301_digits_to_fields(digits)
@@ -6546,47 +6636,80 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"[Earthquake] map overlay failed: {e}")
 
-    def _add_member_pins_to_map(self, m) -> None:
-        """Add persistent pink halo pins for group members to the folium map.
+    @staticmethod
+    def _watchlist_pin_icon(color: str, shape: str) -> "folium.DivIcon":
+        """Build a 16x16 halo icon for a watchlist pin: translucent fill only,
+        no outline, as inline SVG so shapes need no plugin and render offline.
+        Unknown colors/shapes fall back to the pink circle."""
+        hex_color = WATCHLIST_OBJECT_COLORS.get(
+            (color or "").upper(), WATCHLIST_OBJECT_COLORS[DEFAULT_OBJECT_COLOR])
+        shape = (shape or "").upper()
+        if shape == "SQUARE":
+            svg_shape = '<rect x="0" y="0" width="16" height="16"'
+        elif shape == "TRIANGLE":
+            svg_shape = '<polygon points="8,0 16,16 0,16"'
+        else:
+            svg_shape = '<circle cx="8" cy="8" r="8"'
+        html = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">'
+            f'{svg_shape} fill="{hex_color}" fill-opacity="0.80"/></svg>'
+        )
+        return folium.DivIcon(html=html, icon_size=(16, 16), icon_anchor=(8, 8))
+
+    def _add_watchlist_pins_to_map(self, m) -> None:
+        """Add persistent halo pins for watchlist members to the folium map,
+        in each watchlist's configured pin color and shape.
 
         Drawn before the StatRep pins so live pins render on top, and queried
         outside the StatRep pipeline so they ignore every date/group/hide
-        filter and never appear in the status report table."""
-        self._member_pin_click_js = []
+        filter and never appear in the status report table.
+
+        Placement precedence: an operator grid override beats the stored
+        lat/lon (the FCC-derived location is stale for the same reason the
+        override exists), which beats the FCC grid."""
+        self._watchlist_pin_click_js = []
         try:
-            shown_groups = self.config.get_member_pin_groups()
-            if not shown_groups:
+            shown = self.config.get_shown_watchlists()
+            if not shown:
                 return
-            for callsign, lat, lon, grid in self.db.get_member_pins(shown_groups):
+            # Leaflet markers live in markerPane (z-index 600), which paints
+            # above the StatRep CircleMarkers' overlayPane (z-index 400)
+            # regardless of add order — so DOM order alone can't put StatRep
+            # pins on top. Route watchlist pins through a custom pane below
+            # overlayPane instead; pointer_events stays on so the halo click
+            # binding below still works.
+            folium.map.CustomPane("watchlistPane", z_index=350, pointer_events=True).add_to(m)
+            for callsign, lat, lon, grid, grid_override, object_color, object_shape in \
+                    self.db.get_watchlist_pins(shown):
                 try:
-                    if lat is None or lon is None:
+                    coords = None
+                    if grid_override:
+                        coords = self._grid_to_latlon(grid_override)
+                    if coords is None and lat is not None and lon is not None:
+                        coords = (lat, lon)
+                    if coords is None:
                         coords = self._grid_to_latlon(grid or "")
-                        if coords is None:
-                            continue
-                        lat, lon = coords
-                    marker = folium.CircleMarker(
+                    if coords is None:
+                        continue
+                    lat, lon = coords
+                    marker = folium.Marker(
                         location=[float(lat), float(lon)],
-                        radius=10,
-                        fill=True,
-                        color="#e83e8c",
-                        fill_color="#e83e8c",
-                        fill_opacity=0.40,
-                        opacity=0,
-                        weight=2,
+                        icon=self._watchlist_pin_icon(object_color, object_shape),
                         tooltip=callsign,
+                        pane="watchlistPane",
                     )
                     marker.add_to(m)
                     # Clicking the halo opens the QRZ Lookup module, routed
                     # through the commstat:// scheme intercepted in
                     # CustomWebEnginePage.acceptNavigationRequest.
-                    self._member_pin_click_js.append(
+                    self._watchlist_pin_click_js.append(
                         f"{marker.get_name()}.on('click', function() {{"
-                        f" window.location.href = 'commstat://member-pin/{callsign}'; }});"
+                        f" window.location.href = 'commstat://watchlist-pin/{callsign}'; }});"
                     )
                 except Exception as e:
-                    print(f"[MemberPins] skipped {callsign}: {e}")
+                    print(f"[WatchlistPins] skipped {callsign}: {e}")
         except Exception as e:
-            print(f"[MemberPins] map overlay failed: {e}")
+            print(f"[WatchlistPins] map overlay failed: {e}")
 
     def _grid_to_latlon(self, grid: str) -> Optional[Tuple[float, float]]:
         """Convert a Maidenhead grid square to (lat, lon), or None if invalid."""
@@ -6689,8 +6812,10 @@ class MainWindow(QtWidgets.QMainWindow):
         US_BBOX = REGION_BBOX["us"]
         region_counts = {"us": 0, "eu": 0, "mideast": 0, "seasia": 0, "world": 0}
 
-        # Member pins go on the map first so StatRep pins paint on top of them.
-        self._add_member_pins_to_map(m)
+        # Member pins render in a custom pane below StatRep's overlayPane (see
+        # _add_watchlist_pins_to_map) so StatRep pins always paint on top,
+        # even sharing a grid square.
+        self._add_watchlist_pins_to_map(m)
 
         pin_registry = {}  # statrep_id -> [lat, lon] for bounce/pan; populated inside try
         # Get StatRep data for pins
@@ -6793,6 +6918,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     # Map Filter "map"/"custom" states bypass these entirely.
                     if self._map_filter_state not in ("map", "custom"):
+                        # Skip every pin when Hide All Pins is active
+                        if self._hide_all_pins:
+                            continue
+
                         # Skip green pins when filter is active
                         if self._hide_green_pins and status == "1":
                             continue
@@ -7064,17 +7193,17 @@ window.commstatBouncePin = function(srid) {
 </script>"""
         map_html = map_html.replace('</body>', bounce_js + '\n</body>')
 
-        # Member pin click bindings (built in _add_member_pins_to_map).
+        # Watchlist pin click bindings (built in _add_watchlist_pins_to_map).
         # Folium emits the script that DEFINES the marker variables after
         # </body>, i.e. after this injected block executes — so the bindings
         # must wait for the window load event or they hit a ReferenceError.
-        if getattr(self, '_member_pin_click_js', None):
-            member_click_js = (
+        if getattr(self, '_watchlist_pin_click_js', None):
+            watchlist_click_js = (
                 '<script>\nwindow.addEventListener("load", function() {\n'
-                + '\n'.join(self._member_pin_click_js)
+                + '\n'.join(self._watchlist_pin_click_js)
                 + '\n});\n</script>'
             )
-            map_html = map_html.replace('</body>', member_click_js + '\n</body>')
+            map_html = map_html.replace('</body>', watchlist_click_js + '\n</body>')
 
         # Always set new HTML content (reload() only refreshes cached content).
         # Exception: while a video is playing, map_widget is showing the video
@@ -7280,6 +7409,8 @@ window.commstatBouncePin = function(srid) {
         )
 
         if not bypass_menu:
+            if self._hide_all_pins:
+                data = []
             if self._hide_internet_statrep:
                 data = [row for row in data if row[21] == 1]
             if self._hide_green_pins:
@@ -7497,6 +7628,10 @@ window.commstatBouncePin = function(srid) {
     def _on_live_radiation_map(self) -> None:
         """Open the Live Radiation Map (gmcmap.com) in the user's browser."""
         self._open_external_link("https://gmcmap.com/", "Live Radiation Map")
+
+    def _on_reports(self) -> None:
+        # TODO: Reports feature — placeholder menu item, behavior not yet implemented.
+        pass
 
     def _on_qrz_lookup(self) -> None:
         """Open standalone QRZ Lookup dialog (Tools menu)."""
@@ -8047,6 +8182,15 @@ window.commstatBouncePin = function(srid) {
                 self.map_radar_action.setEnabled(True)
                 self.map_radar_action.setChecked(self.config.get_weather_radar())
 
+    def _sync_earthquake_action(self) -> None:
+        if hasattr(self, "map_earthquake_action"):
+            if not self._internet_available:
+                self.map_earthquake_action.setChecked(False)
+                self.map_earthquake_action.setEnabled(False)
+            else:
+                self.map_earthquake_action.setEnabled(True)
+                self.map_earthquake_action.setChecked(self.config.get_earthquake_layer())
+
 
     def _setup_radar_refresh_timer(self) -> None:
         if not hasattr(self, "radar_refresh_timer"):
@@ -8138,23 +8282,29 @@ window.commstatBouncePin = function(srid) {
         self._load_statrep_data()
         self._save_map_position(callback=self._load_map)
 
-    def _on_toggle_member_pin_group(self, group_name: str, checked: bool) -> None:
-        """Show or hide one group's member pins on the map."""
-        shown = self.config.get_member_pin_groups()
-        if checked and group_name not in shown:
-            shown.append(group_name)
-        elif not checked and group_name in shown:
-            shown.remove(group_name)
-        self.config.set_member_pin_groups(shown)
+    def _on_toggle_hide_all_pins(self, checked: bool) -> None:
+        """Hide every statrep pin from table and map. Session-only — resets on restart."""
+        self._hide_all_pins = checked
+        self._load_statrep_data()
         self._save_map_position(callback=self._load_map)
 
-    def _on_member_pins_help(self) -> None:
-        """Open the Group Member Pins help module."""
-        show = self._resolve_dialog_class("help", "show_member_pins_help")
+    def _on_toggle_watchlist_pin(self, watchlist_name: str, checked: bool) -> None:
+        """Show or hide one watchlist's member pins on the map."""
+        shown = self.config.get_shown_watchlists()
+        if checked and watchlist_name not in shown:
+            shown.append(watchlist_name)
+        elif not checked and watchlist_name in shown:
+            shown.remove(watchlist_name)
+        self.config.set_shown_watchlists(shown)
+        self._save_map_position(callback=self._load_map)
+
+    def _on_watchlist_pins_help(self) -> None:
+        """Open the Watchlist Pins help module."""
+        show = self._resolve_dialog_class("help", "show_watchlist_pins_help")
         show(self, **self._help_theme_colors())
 
-    def _on_member_pin_clicked(self, callsign: str) -> None:
-        """Open the QRZ Lookup module for a member pin's callsign — the same
+    def _on_watchlist_pin_clicked(self, callsign: str) -> None:
+        """Open the QRZ Lookup module for a watchlist pin's callsign — the same
         module that opens when clicking a callsign in the Contacts table."""
         callsign = (callsign or "").strip().upper()
         if not callsign:
@@ -8472,24 +8622,34 @@ window.commstatBouncePin = function(srid) {
         dialog.exec_()
         self._populate_groups_menu()
         self._populate_filter_groups_menu()
-        self._populate_member_pins_menu()
-        # Prune unchecked_groups and member_pin_groups entries for groups that
-        # no longer exist
+        # Prune unchecked_groups entries for groups that no longer exist
         all_groups = set(self.db.get_all_groups())
         pruned = [g for g in self.config.get_unchecked_groups() if g in all_groups]
         self.config.set_unchecked_groups(pruned)
-        pin_pruned = [g for g in self.config.get_member_pin_groups() if g in all_groups]
-        self.config.set_member_pin_groups(pin_pruned)
         self._refresh_all_data()
+
+    def _on_manage_watchlists(self) -> None:
+        """Open Manage Watchlists window."""
+        Cls = self._resolve_dialog_class("watchlists", "WatchlistsDialog")
+        dialog = Cls(self.db, self)
+        dialog.exec_()
+        self._populate_watchlist_pins_menu()
+        # Prune shown_watchlists entries for watchlists that no longer exist
+        all_watchlists = set(self.db.get_all_watchlists())
+        pruned = [w for w in self.config.get_shown_watchlists() if w in all_watchlists]
+        self.config.set_shown_watchlists(pruned)
+        # Membership or pin styling may have changed — redraw the map.
+        self._save_map_position(callback=self._load_map)
 
 
     def _populate_groups_menu(self) -> None:
         """Remove any stale group label actions from the Config menu."""
-        # Indices 0-11 are the permanent Config items (settings actions, the
-        # Alerts, Msgs & Videos section with its three checkboxes, and the
-        # Help item); anything beyond is a stale group label to strip.
+        # Indices 0-10 are the permanent Config items (settings actions incl.
+        # Manage Watchlists, the Alerts, Msgs & Videos section with its three
+        # checkboxes, and the Help item); anything beyond is a stale group
+        # label to strip.
         actions = self.groups_menu.actions()
-        for action in actions[12:]:
+        for action in actions[11:]:
             self.groups_menu.removeAction(action)
 
     def _populate_filter_groups_menu(self) -> None:
@@ -8507,22 +8667,22 @@ window.commstatBouncePin = function(srid) {
             self.filter_menu.insertAction(self.show_every_group_action, action)
             self.filter_group_actions[name] = action
 
-    def _populate_member_pins_menu(self) -> None:
-        """Populate the Group Member Pins section with one checkbox per group
+    def _populate_watchlist_pins_menu(self) -> None:
+        """Populate the Watchlist overlay section with one checkbox per watchlist
         that has members, inserted above the section's Help item."""
-        for action in self.member_pin_group_actions.values():
-            self.filter_menu.removeAction(action)
-        self.member_pin_group_actions.clear()
+        for action in self.watchlist_pin_actions.values():
+            self.map_theme_menu.removeAction(action)
+        self.watchlist_pin_actions.clear()
 
-        shown = set(self.config.get_member_pin_groups())
-        counts = self.db.get_group_member_counts()
+        shown = set(self.config.get_shown_watchlists())
+        counts = self.db.get_watchlist_member_counts()
         for name in sorted(n for n, c in counts.items() if c > 0):
             action = QtWidgets.QAction(name, self)
             action.setCheckable(True)
             action.setChecked(name in shown)
-            action.triggered.connect(lambda checked, g=name: self._on_toggle_member_pin_group(g, checked))
-            self.filter_menu.insertAction(self.member_pins_help_action, action)
-            self.member_pin_group_actions[name] = action
+            action.triggered.connect(lambda checked, w=name: self._on_toggle_watchlist_pin(w, checked))
+            self.map_theme_menu.insertAction(self.watchlist_pins_help_action, action)
+            self.watchlist_pin_actions[name] = action
 
     def _on_js8_connectors(self) -> None:
         """Open JS8 Connectors management window."""
@@ -8976,14 +9136,7 @@ window.commstatBouncePin = function(srid) {
         comments = sanitize_ascii(comments_raw)
 
         # Map scope
-        SCOPE_MAP = {
-            "1": "My Location",
-            "2": "My Community",
-            "3": "My County",
-            "4": "My Region",
-            "5": "Other Location"
-        }
-        scope = SCOPE_MAP.get(prec_num, "Unknown")
+        scope = scope_text_for_code(prec_num)
 
         # Insert statrep
         sr_fields = list(srcode[:12])  # Use only first 12 digits
