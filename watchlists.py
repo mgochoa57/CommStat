@@ -23,11 +23,12 @@ from PyQt5.QtWidgets import (
 
 from constants import (
     DEFAULT_COLORS, WATCHLIST_OBJECT_COLORS, WATCHLIST_OBJECT_SHAPES,
-    DEFAULT_OBJECT_COLOR, DEFAULT_OBJECT_SHAPE,
+    DEFAULT_OBJECT_COLOR, DEFAULT_OBJECT_SHAPE, COLOR_BTN_HELP,
 )
 from ui_helpers import (
     make_button, make_input, make_combobox, confirm, apply_standard_dialog_chrome,
 )
+from help import show_watchlist_pins_help
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,7 @@ _COL_MEMBERS = "#6f42c1"
 _COL_CLOSE   = "#555555"
 _COL_SAVE    = "#28a745"
 _COL_CANCEL  = "#555555"
+_COL_HELP    = COLOR_BTN_HELP
 
 _WIN_W = 760
 _WIN_H = 400
@@ -156,6 +158,7 @@ class WatchlistsDialog(QDialog):
         self.btn_members = make_button("Members", _COL_MEMBERS, 80)
         self.btn_save    = make_button("Save",    _COL_SAVE,    80)
         self.btn_cancel  = make_button("Cancel",  _COL_CANCEL,  80)
+        self.btn_help    = make_button("Help",    _COL_HELP,    80)
         self.btn_close   = make_button("Close",   _COL_CLOSE,   80)
 
         self.btn_edit.setEnabled(False)
@@ -171,6 +174,7 @@ class WatchlistsDialog(QDialog):
         self.btn_members.clicked.connect(self._on_members)
         self.btn_save.clicked.connect(lambda: self._exit_edit_mode(save=True))
         self.btn_cancel.clicked.connect(lambda: self._exit_edit_mode(save=False))
+        self.btn_help.clicked.connect(self._on_help)
         self.btn_close.clicked.connect(self.accept)
 
         btn_row.addWidget(self.btn_add)
@@ -180,6 +184,7 @@ class WatchlistsDialog(QDialog):
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(self.btn_cancel)
         btn_row.addStretch()
+        btn_row.addWidget(self.btn_help)
         btn_row.addWidget(self.btn_close)
         body.addLayout(btn_row)
 
@@ -427,6 +432,9 @@ class WatchlistsDialog(QDialog):
             QMessageBox.critical(self, "Error", "Could not delete watchlist.")
             return
         self._load()
+
+    def _on_help(self) -> None:
+        show_watchlist_pins_help(self)
 
     def _on_members(self) -> None:
         if self._in_edit_mode:

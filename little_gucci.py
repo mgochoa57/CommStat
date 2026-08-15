@@ -29,6 +29,7 @@ import sqlite3
 import threading
 import subprocess
 import urllib.request
+import urllib.parse
 import ssl
 
 # Print a C-level traceback on segfaults so silent Qt crashes (especially on
@@ -1127,6 +1128,9 @@ class ConfigManager:
                 'earthquake_min_mag': 2.5,
                 'earthquake_region': 'Worldwide',
                 'earthquake_refresh': 10,
+                'wildfire_layer': False,
+                'wildfire_min_acres': 10.0,
+                'wildfire_refresh': 30,
                 'shown_watchlists': '',
                 'font_family': 'Segoe UI',
                 'font_size': 9,
@@ -1169,6 +1173,9 @@ class ConfigManager:
                 'earthquake_min_mag':     config.getfloat("DIRECTEDCONFIG", "earthquake_min_mag",     fallback=2.5),
                 'earthquake_region':      config.get("DIRECTEDCONFIG", "earthquake_region",      fallback="Worldwide"),
                 'earthquake_refresh':     config.getint("DIRECTEDCONFIG", "earthquake_refresh",     fallback=10),
+                'wildfire_layer':         config.getboolean("DIRECTEDCONFIG", "wildfire_layer",         fallback=False),
+                'wildfire_min_acres':     config.getfloat("DIRECTEDCONFIG", "wildfire_min_acres",     fallback=10.0),
+                'wildfire_refresh':       config.getint("DIRECTEDCONFIG", "wildfire_refresh",       fallback=30),
                 'shown_watchlists':       config.get("DIRECTEDCONFIG", "shown_watchlists",       fallback=""),
                 'map_theme':              config.get("DIRECTEDCONFIG", "map_theme",              fallback='dark'),
             }
@@ -1190,6 +1197,9 @@ class ConfigManager:
                 'earthquake_min_mag': 2.5,
                 'earthquake_region': 'Worldwide',
                 'earthquake_refresh': 10,
+                'wildfire_layer': False,
+                'wildfire_min_acres': 10.0,
+                'wildfire_refresh': 30,
                 'shown_watchlists': '',
                 'map_theme': 'dark',
             }
@@ -1430,6 +1440,30 @@ class ConfigManager:
 
     def set_earthquake_refresh(self, value: int) -> None:
         self._save_setting('earthquake_refresh', value)
+
+    def get_wildfire_layer(self) -> bool:
+        return bool(self.directed_config.get('wildfire_layer', False))
+
+    def set_wildfire_layer(self, value: bool) -> None:
+        self._save_setting('wildfire_layer', value)
+
+    def get_wildfire_min_acres(self) -> float:
+        try:
+            return float(self.directed_config.get('wildfire_min_acres', 10.0))
+        except Exception:
+            return 10.0
+
+    def set_wildfire_min_acres(self, value: float) -> None:
+        self._save_setting('wildfire_min_acres', value)
+
+    def get_wildfire_refresh(self) -> int:
+        try:
+            return int(self.directed_config.get('wildfire_refresh', 30))
+        except Exception:
+            return 30
+
+    def set_wildfire_refresh(self, value: int) -> None:
+        self._save_setting('wildfire_refresh', value)
 
     def get_selected_rss_feed(self) -> str:
         return self.directed_config.get('selected_rss_feed', list(DEFAULT_RSS_FEEDS.keys())[0])
@@ -3372,8 +3406,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # rest of the session even after connectivity returns.
             self._sync_weather_radar_action()
             self._sync_earthquake_action()
+            self._sync_wildfire_action()
             self._restart_radar_refresh_timer()
-            if self.config.get_weather_radar() or self.config.get_earthquake_layer():
+            if self.config.get_weather_radar() or self.config.get_earthquake_layer() or self.config.get_wildfire_layer():
                 self._save_map_position(callback=self._load_map)
         elif not self._internet_available:
             print("Internet connectivity: Still not available (will retry in 30 minutes)")
@@ -3762,21 +3797,47 @@ class MainWindow(QtWidgets.QMainWindow):
             self.map_eq_refresh_menu.addAction(action)
             self.map_eq_refresh_actions[minutes] = action
 
+        self.map_theme_menu.addSeparator()
+
+        self.map_wildfire_action = QtWidgets.QAction("Wildfires (NIFC)", self)
+        self.map_wildfire_action.setCheckable(True)
+        self.map_wildfire_action.setChecked(self.config.get_wildfire_layer())
+        self.map_wildfire_action.setEnabled(self._internet_available)
+        self.map_wildfire_action.triggered.connect(self._set_wildfire_layer)
+        self.map_theme_menu.addAction(self.map_wildfire_action)
+
+        self.map_wildfire_acres_menu = self.map_theme_menu.addMenu("Wildfire Min Size")
+        self.map_wildfire_acres_actions = {}
+        for acres_value, label in [(0.0, "All"), (10.0, "10+ Acres"), (100.0, "100+ Acres"), (1000.0, "1,000+ Acres")]:
+            action = QtWidgets.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(abs(self.config.get_wildfire_min_acres() - acres_value) < 0.01)
+            action.triggered.connect(lambda checked=False, a=acres_value: self._set_wildfire_min_acres(a))
+            self.map_wildfire_acres_menu.addAction(action)
+            self.map_wildfire_acres_actions[acres_value] = action
+
+        self.map_wildfire_refresh_menu = self.map_theme_menu.addMenu("Wildfire Refresh")
+        self.map_wildfire_refresh_actions = {}
+        for minutes, label in [(10, "10 Minutes"), (30, "30 Minutes"), (60, "60 Minutes")]:
+            action = QtWidgets.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(self.config.get_wildfire_refresh() == minutes)
+            action.triggered.connect(lambda checked=False, m=minutes: self._set_wildfire_refresh(m))
+            self.map_wildfire_refresh_menu.addAction(action)
+            self.map_wildfire_refresh_actions[minutes] = action
+
         # WATCHLIST OVERLAY section — one checkbox per watchlist that has members,
-        # inserted dynamically by _populate_watchlist_pins_menu above the Help item.
+        # inserted dynamically by _populate_watchlist_pins_menu above the next
+        # section's label. (Help now lives on the Manage Watchlists dialog.)
         watchlist_pins_label = QtWidgets.QAction("Watchlist Overlay", self)
         watchlist_pins_label.setEnabled(False)  # Disabled as a section title
         self.map_theme_menu.addAction(watchlist_pins_label)
 
         self.watchlist_pin_actions: Dict[str, QtWidgets.QAction] = {}
 
-        self.watchlist_pins_help_action = QtWidgets.QAction("Help", self)
-        self.watchlist_pins_help_action.triggered.connect(self._on_watchlist_pins_help)
-        self.map_theme_menu.addAction(self.watchlist_pins_help_action)
-
-        map_theme_label = QtWidgets.QAction("Map Theme Options", self)
-        map_theme_label.setEnabled(False)
-        self.map_theme_menu.addAction(map_theme_label)
+        self.map_theme_label = QtWidgets.QAction("Map Theme Options", self)
+        self.map_theme_label.setEnabled(False)
+        self.map_theme_menu.addAction(self.map_theme_label)
 
         self.map_theme_group = QtWidgets.QActionGroup(self)
         self.map_theme_group.setExclusive(True)
@@ -3877,41 +3938,49 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         # Map view toggle buttons (left side of status bar)
-        for label, mode in [
-            ("US", "us"),
-            ("EU", "eu"),
-            ("Mid-East", "mideast"),
-            ("SE Asia", "seasia"),
-            ("World", "world"),
-            ("Images", "images"),
-            ("Videos", "videos"),
-            ("Alerts", "alerts"),
-            ("Contacts", "contacts"),
+        for label, mode, width in [
+            ("US", "us", 58),
+            ("EU", "eu", 58),
+            ("Mid-East", "mideast", 68),
+            ("SE Asia", "seasia", 68),
+            ("World", "world", 68),
+            ("Images", "images", 68),
+            ("Videos", "videos", 68),
+            ("Alerts", "alerts", 68),
+            ("Contacts", "contacts", 68),
         ]:
             btn = QtWidgets.QPushButton(label)
             btn.setFixedHeight(18)
-            btn.setFixedWidth(68)
+            btn.setFixedWidth(width)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda checked, m=mode: self._set_map_view_mode(m))
             self.statusbar.addWidget(btn)
             setattr(self, f"_btn_{mode}", btn)
 
-        # Quick-link buttons after the divider, styled with the menu colors.
-        menu_bg = self.config.get_color('menu_background')
-        menu_fg = self.config.get_color('menu_foreground')
-        for label, url in [
-            ("Weather", "https://www.ventusky.com/"),
-            ("Radiation", "https://gmcmap.com/"),
-            ("Power", "https://poweroutage.us/"),
-            ("Internet", "https://radar.cloudflare.com/outage-center"),
+        # Quick-toggle buttons after the divider: cyan when off, green when
+        # on, shortcuts for the same Map-menu overlay toggles.
+        quick_toggle_style = (
+            f"QPushButton {{ background-color: {COLOR_BTN_CYAN}; color: #FFFFFF;"
+            f" border: none; border-radius: 4px; padding: 2px 10px; }}"
+            f"QPushButton:checked {{ background-color: {COLOR_BTN_GREEN}; color: #FFFFFF; }}"
+            f"QPushButton:disabled {{ background-color: {COLOR_BTN_GRAY}; color: #333333; }}"
+        )
+        for label, getter, setter_name, attr_name in [
+            ("Weather",  self.config.get_weather_radar,    "_set_weather_radar",   "quick_weather_btn"),
+            ("Quakes",   self.config.get_earthquake_layer, "_set_earthquake_layer", "quick_earthquake_btn"),
+            ("Wildfire", self.config.get_wildfire_layer,   "_set_wildfire_layer",  "quick_wildfire_btn"),
         ]:
             btn = QtWidgets.QPushButton(label)
             btn.setFixedHeight(18)
-            btn.setFixedWidth(70)
+            btn.setFixedWidth(74)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(f"background-color: {menu_bg}; color: {menu_fg}; border: none; border-radius: 4px; padding: 2px 10px;")
-            btn.clicked.connect(lambda checked, u=url, lbl=label: self._open_external_link(u, lbl))
+            btn.setCheckable(True)
+            btn.setChecked(getter())
+            btn.setEnabled(self._internet_available)
+            btn.setStyleSheet(quick_toggle_style)
+            btn.clicked.connect(getattr(self, setter_name))
             self.statusbar.addWidget(btn)
+            setattr(self, attr_name, btn)
 
         # Add "Rig Status:" label (no sunken effect, permanent on right)
         rig_status_header = QtWidgets.QLabel(" Rig Status: ")
@@ -6636,6 +6705,141 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"[Earthquake] map overlay failed: {e}")
 
+    def _fetch_wildfire_events(self) -> list:
+        """Fetch and cache current US wildfire incidents from NIFC's public
+        WFIGS feed (no API key required). Returns cached data on failure."""
+        try:
+            if not getattr(self, "_internet_available", False):
+                return getattr(self, "_wildfire_cache", [])
+
+            min_acres = self.config.get_wildfire_min_acres() if hasattr(self.config, "get_wildfire_min_acres") else 10.0
+
+            now = time.time()
+            refresh_min = self.config.get_wildfire_refresh() if hasattr(self.config, "get_wildfire_refresh") else 30
+            if getattr(self, "_wildfire_cache", None) and now - getattr(self, "_wildfire_cache_time", 0) < max(300, refresh_min * 60):
+                return self._wildfire_cache
+
+            # WFIGS Incident Locations (Current) - NIFC's public, keyless feed of
+            # open wildland fire incidents. IncidentTypeCategory='WF' excludes
+            # prescribed burns (RX) and complexes (CX).
+            base = ("https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/"
+                    "WFIGS_Incident_Locations_Current/FeatureServer/0/query")
+            params = {
+                "where": f"IncidentTypeCategory='WF' AND IncidentSize>={min_acres}",
+                "outFields": "IncidentName,IncidentSize,PercentContained,"
+                             "FireDiscoveryDateTime,POOState,IncidentComplexityLevel",
+                "orderByFields": "IncidentSize DESC",
+                "resultRecordCount": "1000",
+                "f": "geojson",
+            }
+            url = base + "?" + urllib.parse.urlencode(params)
+
+            request = urllib.request.Request(url, headers={"User-Agent": "CommStat/2.5"})
+            with urllib.request.urlopen(request, timeout=8, context=create_verified_ssl_context()) as response:
+                data = json.loads(response.read().decode("utf-8", errors="replace"))
+
+            events = []
+            for feature in data.get("features", []):
+                props = feature.get("properties", {}) or {}
+                geom = feature.get("geometry", {}) or {}
+                coords = geom.get("coordinates") or []
+                if len(coords) < 2:
+                    continue
+                lon, lat = coords[0], coords[1]
+                acres = props.get("IncidentSize")
+                if acres is None:
+                    continue
+                try:
+                    acres = float(acres)
+                except Exception:
+                    continue
+
+                events.append({
+                    "name": props.get("IncidentName") or "Unnamed Incident",
+                    "acres": acres,
+                    "contained": props.get("PercentContained"),
+                    "discovered": props.get("FireDiscoveryDateTime"),
+                    "state": (props.get("POOState") or "").replace("US-", ""),
+                    "complexity": props.get("IncidentComplexityLevel") or "Unknown",
+                    "lat": lat,
+                    "lon": lon,
+                })
+
+            self._wildfire_cache = events
+            self._wildfire_cache_time = now
+            return events
+        except Exception as e:
+            print(f"[Wildfire] NIFC feed unavailable: {e}")
+            return getattr(self, "_wildfire_cache", [])
+
+    def _wildfire_color(self, acres: float) -> str:
+        # Deliberately the conventional fire yellow/orange/red scale - the
+        # flame-shaped icon (not a circle) already keeps it visually distinct
+        # from station status pins and earthquake markers on the same map.
+        if acres >= 10000:
+            return "#8b0000"   # dark red - megafire
+        if acres >= 1000:
+            return "#ff4500"   # red-orange
+        if acres >= 100:
+            return "#ff8c00"   # dark orange
+        return "#ffc107"       # gold
+
+    @staticmethod
+    def _wildfire_icon(color: str) -> "folium.DivIcon":
+        """Build an 18x18 flame-shaped icon so wildfire markers read as fire
+        at a glance, distinct in silhouette from every other circular pin
+        type on the map (status reports, watchlist objects, earthquakes)."""
+        html = f'''
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
+            <path d="M9 1 C9 1 4 6.5 4 10.5 C4 13.5 6.5 16 9 16 C11.5 16 14 13.5 14 10.5 C14 6.5 9 1 9 1 Z"
+                  fill="{color}" fill-opacity="0.92" stroke="#3a1200" stroke-width="0.8"/>
+        </svg>
+        '''
+        return folium.DivIcon(html=html, icon_size=(18, 18), icon_anchor=(9, 15))
+
+    def _add_wildfires_to_map(self, m) -> None:
+        """Add optional NIFC wildfire incident markers to the folium map."""
+        try:
+            if not (hasattr(self.config, "get_wildfire_layer") and self.config.get_wildfire_layer()):
+                return
+
+            fg = folium.FeatureGroup(name="Wildfires (NIFC)", overlay=True, control=True, show=True)
+            for fire in self._fetch_wildfire_events():
+                acres = fire["acres"]
+                color = self._wildfire_color(acres)
+                t = fire.get("discovered")
+                if t:
+                    try:
+                        t_str = datetime.fromtimestamp(int(t) / 1000, timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+                    except Exception:
+                        t_str = "Unknown"
+                else:
+                    t_str = "Unknown"
+
+                contained = fire.get("contained")
+                contained_str = f"{int(contained)}%" if contained is not None else "Unknown"
+
+                popup_html = f"""
+                <div style='font-family:Arial,sans-serif;background:rgba(20,20,20,.96);color:#f5f5f5;
+                            padding:8px 10px;border:1px solid #777;border-radius:6px;min-width:210px;'>
+                    <div style='font-weight:bold;font-size:14px;color:{color};'>{fire['name']}</div>
+                    <div><b>Size:</b> {acres:,.0f} acres</div>
+                    <div><b>Contained:</b> {contained_str}</div>
+                    <div><b>Discovered:</b> {t_str}</div>
+                    <div><b>State:</b> {fire.get('state') or 'Unknown'}</div>
+                    <div><b>Complexity:</b> {fire.get('complexity')}</div>
+                </div>
+                """
+                folium.Marker(
+                    location=[fire["lat"], fire["lon"]],
+                    icon=self._wildfire_icon(color),
+                    popup=folium.Popup(popup_html, max_width=280),
+                    tooltip=f"{fire['name']} ({acres:,.0f} ac)"
+                ).add_to(fg)
+            fg.add_to(m)
+        except Exception as e:
+            print(f"[Wildfire] map overlay failed: {e}")
+
     @staticmethod
     def _watchlist_pin_icon(color: str, shape: str) -> "folium.DivIcon":
         """Build a 16x16 halo icon for a watchlist pin: translucent fill only,
@@ -6989,6 +7193,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_region_button_pin_indicators()
 
         self._add_earthquakes_to_map(m)
+        self._add_wildfires_to_map(m)
 
         # Save map to bytes and display
         map_data = io.BytesIO()
@@ -8167,6 +8372,9 @@ window.commstatBouncePin = function(srid) {
             if hasattr(self, "map_radar_action"):
                 self.map_radar_action.setChecked(enabled)
                 self.map_radar_action.setEnabled(self._internet_available)
+            if hasattr(self, "quick_weather_btn"):
+                self.quick_weather_btn.setChecked(enabled)
+                self.quick_weather_btn.setEnabled(self._internet_available)
             self._restart_radar_refresh_timer()
             self._save_map_position(callback=self._load_map)
         except Exception as e:
@@ -8181,6 +8389,13 @@ window.commstatBouncePin = function(srid) {
             else:
                 self.map_radar_action.setEnabled(True)
                 self.map_radar_action.setChecked(self.config.get_weather_radar())
+        if hasattr(self, "quick_weather_btn"):
+            if not self._internet_available:
+                self.quick_weather_btn.setChecked(False)
+                self.quick_weather_btn.setEnabled(False)
+            else:
+                self.quick_weather_btn.setEnabled(True)
+                self.quick_weather_btn.setChecked(self.config.get_weather_radar())
 
     def _sync_earthquake_action(self) -> None:
         if hasattr(self, "map_earthquake_action"):
@@ -8190,6 +8405,29 @@ window.commstatBouncePin = function(srid) {
             else:
                 self.map_earthquake_action.setEnabled(True)
                 self.map_earthquake_action.setChecked(self.config.get_earthquake_layer())
+        if hasattr(self, "quick_earthquake_btn"):
+            if not self._internet_available:
+                self.quick_earthquake_btn.setChecked(False)
+                self.quick_earthquake_btn.setEnabled(False)
+            else:
+                self.quick_earthquake_btn.setEnabled(True)
+                self.quick_earthquake_btn.setChecked(self.config.get_earthquake_layer())
+
+    def _sync_wildfire_action(self) -> None:
+        if hasattr(self, "map_wildfire_action"):
+            if not self._internet_available:
+                self.map_wildfire_action.setChecked(False)
+                self.map_wildfire_action.setEnabled(False)
+            else:
+                self.map_wildfire_action.setEnabled(True)
+                self.map_wildfire_action.setChecked(self.config.get_wildfire_layer())
+        if hasattr(self, "quick_wildfire_btn"):
+            if not self._internet_available:
+                self.quick_wildfire_btn.setChecked(False)
+                self.quick_wildfire_btn.setEnabled(False)
+            else:
+                self.quick_wildfire_btn.setEnabled(True)
+                self.quick_wildfire_btn.setChecked(self.config.get_wildfire_layer())
 
 
     def _setup_radar_refresh_timer(self) -> None:
@@ -8234,6 +8472,9 @@ window.commstatBouncePin = function(srid) {
             if hasattr(self, "map_earthquake_action"):
                 self.map_earthquake_action.setChecked(enabled)
                 self.map_earthquake_action.setEnabled(self._internet_available)
+            if hasattr(self, "quick_earthquake_btn"):
+                self.quick_earthquake_btn.setChecked(enabled)
+                self.quick_earthquake_btn.setEnabled(self._internet_available)
             self._earthquake_cache = []
             self._earthquake_cache_time = 0
             self._save_map_position(callback=self._load_map)
@@ -8276,6 +8517,46 @@ window.commstatBouncePin = function(srid) {
         except Exception as e:
             print(f"Earthquake refresh switch failed: {e}")
 
+    def _set_wildfire_layer(self, checked: bool) -> None:
+        try:
+            enabled = bool(checked and self._internet_available)
+            self.config.set_wildfire_layer(enabled)
+            if hasattr(self, "map_wildfire_action"):
+                self.map_wildfire_action.setChecked(enabled)
+                self.map_wildfire_action.setEnabled(self._internet_available)
+            if hasattr(self, "quick_wildfire_btn"):
+                self.quick_wildfire_btn.setChecked(enabled)
+                self.quick_wildfire_btn.setEnabled(self._internet_available)
+            self._wildfire_cache = []
+            self._wildfire_cache_time = 0
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Wildfire layer switch failed: {e}")
+
+    def _set_wildfire_min_acres(self, acres: float) -> None:
+        try:
+            self.config.set_wildfire_min_acres(float(acres))
+            if hasattr(self, "map_wildfire_acres_actions"):
+                for value, action in self.map_wildfire_acres_actions.items():
+                    action.setChecked(abs(float(value) - float(acres)) < 0.01)
+            self._wildfire_cache = []
+            self._wildfire_cache_time = 0
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Wildfire size switch failed: {e}")
+
+    def _set_wildfire_refresh(self, minutes: int) -> None:
+        try:
+            self.config.set_wildfire_refresh(int(minutes))
+            if hasattr(self, "map_wildfire_refresh_actions"):
+                for value, action in self.map_wildfire_refresh_actions.items():
+                    action.setChecked(value == minutes)
+            self._wildfire_cache = []
+            self._wildfire_cache_time = 0
+            self._save_map_position(callback=self._load_map)
+        except Exception as e:
+            print(f"Wildfire refresh switch failed: {e}")
+
     def _on_toggle_hide_green_pins(self, checked: bool) -> None:
         """Hide green (all-clear) statreps from table and map. Session-only — resets on restart."""
         self._hide_green_pins = checked
@@ -8297,11 +8578,6 @@ window.commstatBouncePin = function(srid) {
             shown.remove(watchlist_name)
         self.config.set_shown_watchlists(shown)
         self._save_map_position(callback=self._load_map)
-
-    def _on_watchlist_pins_help(self) -> None:
-        """Open the Watchlist Pins help module."""
-        show = self._resolve_dialog_class("help", "show_watchlist_pins_help")
-        show(self, **self._help_theme_colors())
 
     def _on_watchlist_pin_clicked(self, callsign: str) -> None:
         """Open the QRZ Lookup module for a watchlist pin's callsign — the same
@@ -8669,7 +8945,7 @@ window.commstatBouncePin = function(srid) {
 
     def _populate_watchlist_pins_menu(self) -> None:
         """Populate the Watchlist overlay section with one checkbox per watchlist
-        that has members, inserted above the section's Help item."""
+        that has members, inserted above the Map Theme Options section."""
         for action in self.watchlist_pin_actions.values():
             self.map_theme_menu.removeAction(action)
         self.watchlist_pin_actions.clear()
@@ -8681,7 +8957,7 @@ window.commstatBouncePin = function(srid) {
             action.setCheckable(True)
             action.setChecked(name in shown)
             action.triggered.connect(lambda checked, w=name: self._on_toggle_watchlist_pin(w, checked))
-            self.map_theme_menu.insertAction(self.watchlist_pins_help_action, action)
+            self.map_theme_menu.insertAction(self.map_theme_label, action)
             self.watchlist_pin_actions[name] = action
 
     def _on_js8_connectors(self) -> None:

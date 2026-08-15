@@ -330,6 +330,12 @@ will fail, since there isn't one, but you can then enter the gridsquare
 yourself and click the <b>Save</b> button. You can also add friends, family,
 taco stands, or doughnut shops &mdash; anything you want to see on the map.</p>
 
+<p style="text-align:center;">
+<img src="watchlist-example.png" width="520" height="281" style="border:1px solid #ccc;"><br>
+<span style="font-size:12px; color:#666666;">This is an example of 35 of the
+57 nuclear power plants in the United States.</span>
+</p>
+
 <p style="background-color:#EAF2FA; padding:8px;">
 <b>Wrong location?</b> Callsign locations come from FCC records, and people
 move. If a member's grid square is out of date, run their callsign through
