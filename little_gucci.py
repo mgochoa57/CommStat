@@ -806,19 +806,14 @@ def _extract_youtube_id(url: str) -> Optional[str]:
 # Video player page loaded into the map QWebEngineView. Uses the YouTube
 # IFrame Player API; end-of-video navigates to commstat://video-ended (map
 # buttons are the way back to the map, so there's no on-screen exit control),
-# Prev/Next navigate to commstat://video-prev / commstat://video-next,
+# Prev/Next navigate to commstat://video-prev / commstat://video-next, and
 # YouTube navigates to commstat://video-youtube/{video_id} (opens the video
-# in the system browser), and Delete navigates to commstat://video-delete —
-# CustomWebEnginePage routes these to _on_video_ended / _on_video_prev /
-# _on_video_next / opening the browser / _on_video_delete. No autoplay: a
-# transparent overlay (#tap) captures
-# clicks anywhere on the video and toggles play/pause; a centered play
-# badge shows while paused. The title overlays the top of the video and a
-# "Date Sent / Sent By" meta line (same format as the Alerts panel)
-# overlays the bottom, both in white so the user can see what's loaded;
-# both disappear once playback starts (same paused/not-paused toggle as
-# the play badge). Prev/Next (bottom corners) and YouTube/Delete (bottom
-# center, side by side) stay hidden until the mouse
+# in the system browser). CustomWebEnginePage routes these to
+# _on_video_ended / _on_video_prev / _on_video_next / opening the browser.
+# No autoplay: a transparent overlay (#tap) captures
+# clicks anywhere on the video and toggles play/pause. Prev/Next (bottom
+# corners) and YouTube (bottom
+# center) stay hidden until the mouse
 # is over the pane (body:hover) so they don't clutter the video. The
 # iframe is 190px taller than the page and shifted up 95px so YouTube's
 # edge-anchored chrome (paused-state share / "More videos" / "Watch on
@@ -830,23 +825,18 @@ _VIDEO_PLAYER_HTML = """<!DOCTYPE html>
 <style>
 html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}
 #player{position:absolute;top:-95px;left:0;width:100%;height:calc(100% + 190px);border:0;}
+/* #poster is a separate element (not #player itself, which the iframe_api
+   script replaces with the real iframe) so YouTube's static thumbnail (no
+   API key needed) stays visible above the iframe's own black paused frame
+   (controls:0 suppresses YouTube's native thumbnail) until playback
+   actually starts. Sized to the real visible pane (not #player's oversized/
+   shifted box, which exists only to crop YouTube's iframe chrome off the
+   video) since hqdefault.jpg is already 16:9 and needs no cropping. */
+#poster{position:absolute;top:0;left:0;width:100%;height:100%;
+background-image:url('https://img.youtube.com/vi/__VIDEO_ID__/hqdefault.jpg');
+background-size:cover;background-position:center;background-color:#000;
+z-index:3;pointer-events:none;}
 #tap{position:absolute;top:0;left:0;width:100%;height:100%;z-index:5;cursor:pointer;}
-#playbadge{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
-width:72px;height:72px;border-radius:50%;background:rgba(0,0,0,0.55);
-border:2px solid rgba(255,255,255,0.8);color:#fff;font-size:32px;
-display:flex;align-items:center;justify-content:center;pointer-events:none;
-font-family:sans-serif;padding-left:6px;}
-#title{position:absolute;top:20px;left:0;width:100%;box-sizing:border-box;
-padding:10px 14px;z-index:8;color:#fff;font-family:Roboto,sans-serif;
-font-size:19px;font-weight:bold;text-align:center;
-background:linear-gradient(rgba(0,0,0,0.65),rgba(0,0,0,0));
-text-shadow:0 1px 3px rgba(0,0,0,0.8);pointer-events:none;}
-#title:empty{display:none;}
-#meta{position:absolute;bottom:56px;left:0;width:100%;box-sizing:border-box;
-padding:0 14px;z-index:8;color:#fff;font-family:Roboto,sans-serif;
-font-size:__VIDEO_META_SIZE__px;text-align:center;text-shadow:0 1px 3px rgba(0,0,0,0.8);
-pointer-events:none;}
-#meta:empty{display:none;}
 #prev,#next{position:absolute;bottom:8px;z-index:10;
 opacity:0;pointer-events:none;transition:opacity .15s ease;
 background:rgba(0,0,0,0.65);color:#fff;border:1px solid #999;
@@ -860,22 +850,16 @@ display:flex;opacity:0;pointer-events:none;transition:opacity .15s ease;}
 border-radius:4px;padding:4px 12px;font-family:sans-serif;font-size:13px;cursor:pointer;
 margin-right:8px;}
 #youtube:hover{background:rgba(40,167,69,0.85);}
-#delete{background:rgba(220,53,69,0.85);color:#fff;font-family:Roboto,sans-serif;
-font-size:13px;font-weight:bold;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;}
-#delete:hover{background:rgba(200,35,51,0.9);}
-#delete:active{background:rgba(189,33,48,0.95);}
 body:hover #prev,body:hover #next,body:hover #bottomCenter{opacity:1;pointer-events:auto;}
 </style></head>
 <body>
 <div id="player"></div>
-<div id="tap"><div id="playbadge">&#9654;</div></div>
-<div id="title">__VIDEO_TITLE__</div>
-<div id="meta">__VIDEO_META__</div>
+<div id="poster"></div>
+<div id="tap"></div>
 <button id="prev" onclick="window.location='commstat://video-prev';">&#9664; Prev</button>
 <button id="next" onclick="window.location='commstat://video-next';">Next &#9654;</button>
 <div id="bottomCenter">
 <button id="youtube" onclick="window.location='commstat://video-youtube/__VIDEO_ID__';">YouTube</button>
-<button id="delete" onclick="window.location='commstat://video-delete';">Delete</button>
 </div>
 <script>
 var tag = document.createElement('script');
@@ -889,11 +873,7 @@ function onYouTubeIframeAPIReady() {
         events: {
             'onStateChange': function(e) {
                 var playing = (e.data === YT.PlayerState.PLAYING);
-                var titleEl = document.getElementById('title');
-                var metaEl = document.getElementById('meta');
-                document.getElementById('playbadge').style.display = playing ? 'none' : 'flex';
-                titleEl.style.display = (playing || !titleEl.textContent.trim()) ? 'none' : 'block';
-                metaEl.style.display = (playing || !metaEl.textContent.trim()) ? 'none' : 'block';
+                document.getElementById('poster').style.display = playing ? 'none' : 'block';
                 if (e.data === YT.PlayerState.ENDED) {
                     window.location = 'commstat://video-ended';
                 }
@@ -978,12 +958,6 @@ class CustomWebEnginePage(QWebEnginePage):
                     self.parent_widget._open_external_link(youtube_url, "YouTube video")
                 else:
                     QDesktopServices.openUrl(QUrl(youtube_url))
-            return False
-
-        # Handle video Delete
-        if url_str == "commstat://video-delete":
-            if hasattr(self.parent_widget, '_on_video_delete'):
-                self.parent_widget._on_video_delete()
             return False
 
         # Handle the Map Filter dropdown's Help entry
@@ -1251,29 +1225,6 @@ class ConfigManager:
         config.set("COLORS", key, value)
         with open(self.config_path, 'w') as f:
             config.write(f)
-
-    def set_colors(self, colors: Dict[str, str]) -> None:
-        """Save multiple UI color overrides to config.ini."""
-        config = ConfigParser()
-        config.read(self.config_path)
-        if not config.has_section("COLORS"):
-            config.add_section("COLORS")
-        for key, value in colors.items():
-            if key in self.colors:
-                self.colors[key] = value
-                config.set("COLORS", key, value)
-        with open(self.config_path, 'w') as f:
-            config.write(f)
-
-    def reset_colors(self) -> None:
-        """Remove all UI color overrides and restore DEFAULT_COLORS."""
-        self.colors = DEFAULT_COLORS.copy()
-        config = ConfigParser()
-        config.read(self.config_path)
-        if config.has_section("COLORS"):
-            config.remove_section("COLORS")
-            with open(self.config_path, 'w') as f:
-                config.write(f)
 
     def _save_setting(self, key: str, value) -> None:
         """Save a setting to both memory and config file."""
@@ -2599,18 +2550,6 @@ class DatabaseManager:
             conn.commit()
         self._execute(op)
 
-    def delete_video_at_offset(self, offset: int) -> bool:
-        """Delete the video row at the specified offset from most recent."""
-        def op(cursor, conn):
-            cursor.execute(
-                "DELETE FROM videos WHERE id = ("
-                "SELECT id FROM videos ORDER BY datetime DESC LIMIT 1 OFFSET ?)",
-                (offset,)
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        return self._execute(op, False)
-
     def has_unplayed_video(self) -> bool:
         """True if any video row has played = 0."""
         def op(cursor, conn):
@@ -2760,153 +2699,6 @@ class SoundPlayer:
                 lambda: effect.play() if effect.status() == QSoundEffect.Ready else None
             )
             effect.setSource(QUrl.fromLocalFile(abs_path))
-
-
-class ThemeManagerDialog(QtWidgets.QDialog):
-    """Theme Manager: edit CommStat UI colors with color pickers and reset to original defaults."""
-
-    COLOR_LABELS = [
-        ("program_background", "Main Background"),
-        ("program_foreground", "Main Text"),
-        ("menu_background", "Menu Background"),
-        ("menu_foreground", "Menu Text"),
-        ("title_bar_background", "Header Bar Background"),
-        ("title_bar_foreground", "Header Bar Text"),
-        ("newsfeed_background", "News Ticker Background"),
-        ("newsfeed_foreground", "News Ticker Text"),
-        ("time_background", "Clock Background"),
-        ("time_foreground", "Clock Text"),
-        ("data_background", "Table Background"),
-        ("data_foreground", "Table Text"),
-        ("feed_background", "Live Feed Background"),
-        ("feed_foreground", "Live Feed Text"),
-        ("module_background", "Panel / Dialog Background"),
-        ("module_foreground", "Panel / Dialog Text"),
-        ("condition_green", "Status Green"),
-        ("condition_yellow", "Status Yellow"),
-        ("condition_red", "Status Red"),
-        ("condition_gray", "Status Gray"),
-    ]
-
-    def __init__(self, config: "ConfigManager", apply_callback=None, parent=None):
-        super().__init__(parent)
-        self.config = config
-        self.apply_callback = apply_callback
-        self.pending_colors: Dict[str, str] = {}
-        self.setWindowTitle("Theme Manager")
-        self.resize(560, 720)
-        self.color_buttons: Dict[str, QtWidgets.QPushButton] = {}
-
-        self.setStyleSheet("""
-            QDialog { background-color: #101510; color: #F0EAD6; }
-            QLabel {
-                color: #F0EAD6;
-                font-family: Roboto;
-                font-size: 14px;
-                font-weight: bold;
-                background: transparent;
-            }
-            QPushButton {
-                font-family: Roboto;
-                font-size: 13px;
-                padding: 6px 8px;
-            }
-            QScrollArea {
-                background-color: #101510;
-                border: 1px solid #3B4B2A;
-            }
-        """)
-
-        outer = QtWidgets.QVBoxLayout(self)
-
-        title = QtWidgets.QLabel("Theme Manager")
-        title_font = QtGui.QFont("Roboto", -1, QtGui.QFont.Bold)
-        title_font.setPixelSize(18)
-        title.setFont(title_font)
-        outer.addWidget(title)
-
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        body = QtWidgets.QWidget()
-        body.setStyleSheet("background-color: #101510;")
-        grid = QtWidgets.QGridLayout(body)
-        grid.setColumnStretch(1, 1)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(6)
-
-        for row, (key, label) in enumerate(self.COLOR_LABELS):
-            lbl = QtWidgets.QLabel(label)
-            lbl.setMinimumWidth(220)
-            lbl.setStyleSheet("color: #F0EAD6; font-weight: bold; background: transparent;")
-            grid.addWidget(lbl, row, 0)
-
-            btn = QtWidgets.QPushButton(self.config.get_color(key))
-            btn.setMinimumWidth(130)
-            btn.clicked.connect(lambda _, k=key: self._pick_color(k))
-            self.color_buttons[key] = btn
-            self._style_color_button(btn, self.config.get_color(key))
-            grid.addWidget(btn, row, 1)
-
-        scroll.setWidget(body)
-        outer.addWidget(scroll, 1)
-
-        bottom = QtWidgets.QHBoxLayout()
-        apply_btn = QtWidgets.QPushButton("Apply")
-        apply_btn.clicked.connect(self._apply_pending)
-        reset_btn = QtWidgets.QPushButton("Reset To Default")
-        reset_btn.clicked.connect(self._reset_default)
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-
-        bottom.addWidget(apply_btn)
-        bottom.addWidget(reset_btn)
-        bottom.addStretch(1)
-        bottom.addWidget(close_btn)
-        outer.addLayout(bottom)
-
-        note = QtWidgets.QLabel("Pick colors, then press Apply. Reset To Default restores original CommStat colors.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #F0EAD6; background: transparent;")
-        outer.addWidget(note)
-
-    def _style_color_button(self, button: QtWidgets.QPushButton, color: str) -> None:
-        fg = "#000000" if self._is_light(color) else "#FFFFFF"
-        button.setText(color)
-        button.setStyleSheet(
-            f"QPushButton {{ background-color: {color}; color: {fg}; border: 1px solid #777; }}"
-        )
-
-    def _is_light(self, color: str) -> bool:
-        try:
-            c = QtGui.QColor(color)
-            return (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) > 160
-        except Exception:
-            return False
-
-    def _pick_color(self, key: str) -> None:
-        current = QtGui.QColor(self.pending_colors.get(key, self.config.get_color(key)))
-        color = QtWidgets.QColorDialog.getColor(current, self, f"Select {key}")
-        if color.isValid():
-            value = color.name().upper()
-            self.pending_colors[key] = value
-            self._style_color_button(self.color_buttons[key], value)
-
-    def _apply_pending(self) -> None:
-        if self.pending_colors:
-            self.config.set_colors(self.pending_colors)
-            self.pending_colors.clear()
-        self._apply_live()
-
-    def _reset_default(self) -> None:
-        self.pending_colors.clear()
-        self.config.reset_colors()
-        for key, btn in self.color_buttons.items():
-            self._style_color_button(btn, self.config.get_color(key))
-        self._apply_live()
-
-    def _apply_live(self) -> None:
-        if self.apply_callback:
-            self.apply_callback()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -3170,8 +2962,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_copy_shortcut
         )
 
-        # Populate the Groups menu and filter menu group checkboxes
-        self._populate_groups_menu()
+        # Populate the filter menu group checkboxes
         self._populate_filter_groups_menu()
         self._populate_watchlist_pins_menu()
 
@@ -3923,7 +3714,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Menubar items
         create_action(self.menubar, "QRZ", "qrz_lookup", self._on_qrz_lookup)
-        create_action(self.menubar, "Reports", "reports", self._on_reports)
         create_action(self.menubar, "Help", "help", self._on_help)
         create_action(self.menubar, "Exit" + " " * 10, "exit", qApp.quit)
         create_action(self.menubar, "What's New" + " " * 10, "whats_new", self._on_whats_new)
@@ -4339,8 +4129,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.custom_filter_bar.setVisible(False)
 
     def _style_custom_filter_bar(self) -> None:
-        """Apply theme colors to the Custom Filtering bar. Shared by initial
-        setup and _apply_theme_styles so a theme switch restyles it too."""
+        """Apply theme colors to the Custom Filtering bar."""
         # Bar takes the live feed's color pair, not the table header's - kept
         # as a pair so the text stays legible if the feed colors are rethemed.
         bar_bg = self.config.get_color('feed_background')
@@ -7433,12 +7222,12 @@ window.commstatBouncePin = function(srid) {
         isn't YouTube. Marks the row played and refreshes the Videos button
         indicator."""
         row = self.db.get_video_at_offset(getattr(self, '_video_index', 0))
-        video_row_id, url, title, date_received, from_callsign = row if row else (None, None, "", "", "")
+        video_row_id, url = (row[0], row[1]) if row else (None, None)
         video_id = _extract_youtube_id(url) if url else None
         if not video_id:
             self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
             return
-        self._play_video(video_id, title, date_received, from_callsign)
+        self._play_video(video_id)
         self.db.mark_video_played(video_row_id)
         self._update_video_button_indicator()
         # Instagram POC kept for reference — embed loads but playback fails:
@@ -7460,46 +7249,13 @@ window.commstatBouncePin = function(srid) {
             self._video_index = index - 1
             self._play_video_at_index()
 
-    def _on_video_delete(self) -> None:
-        """Delete button: remove the currently displayed video row, then
-        show what's now at the same offset (or step back if it was last)."""
-        index = getattr(self, '_video_index', 0)
-        self.db.delete_video_at_offset(index)
-        count = self.db.get_video_count()
-        if index >= count:
-            self._video_index = max(0, count - 1)
-        self._update_video_button_indicator()
-        self._play_video_at_index()
-
-    def _play_video(self, video_id: str, title: str = "", date_received: str = "",
-                     from_callsign: str = "") -> None:
+    def _play_video(self, video_id: str) -> None:
         """Play a YouTube video in the map pane; the map returns when it ends."""
         # Make sure the web view is the visible pane in the map stack
         if self.map_stack.currentWidget() is not self.map_widget:
             self._set_map_view_mode(getattr(self, '_last_map_region', 'us'))
 
-        def esc(s):
-            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-        title_html = esc(title)
-        # Same "Date Sent / Sent By" format as the Alerts panel
-        # (little_gucci.py:_show_alert_display), trimmed to drop seconds.
-        date_formatted = date_received[:16] if len(date_received) > 16 else date_received
-        meta_parts = []
-        if date_formatted:
-            meta_parts.append(f"<b>Date Sent:</b> {esc(date_formatted)}")
-        if from_callsign:
-            meta_parts.append(f"<b>Sent By:</b> {esc(from_callsign)}")
-        meta_html = "&nbsp;&nbsp;&nbsp;".join(meta_parts)
-        # Same base size/scale formula as the Alerts date label (line ~3889):
-        # max(10, round(19 * scale)).
-        meta_font_px = max(10, round(19 * self._alert_font_scale()))
-
-        html = (_VIDEO_PLAYER_HTML
-                .replace("__VIDEO_ID__", video_id)
-                .replace("__VIDEO_TITLE__", title_html)
-                .replace("__VIDEO_META__", meta_html)
-                .replace("__VIDEO_META_SIZE__", str(meta_font_px)))
+        html = _VIDEO_PLAYER_HTML.replace("__VIDEO_ID__", video_id)
         self.map_widget.setHtml(html, QUrl("http://localhost/"))
 
     def _play_instagram(self, reel_url: str) -> None:
@@ -7833,10 +7589,6 @@ window.commstatBouncePin = function(srid) {
     def _on_live_radiation_map(self) -> None:
         """Open the Live Radiation Map (gmcmap.com) in the user's browser."""
         self._open_external_link("https://gmcmap.com/", "Live Radiation Map")
-
-    def _on_reports(self) -> None:
-        # TODO: Reports feature — placeholder menu item, behavior not yet implemented.
-        pass
 
     def _on_qrz_lookup(self) -> None:
         """Open standalone QRZ Lookup dialog (Tools menu)."""
@@ -8896,7 +8648,6 @@ window.commstatBouncePin = function(srid) {
         Cls = self._resolve_dialog_class("groups", "GroupsDialog")
         dialog = Cls(self.db, self)
         dialog.exec_()
-        self._populate_groups_menu()
         self._populate_filter_groups_menu()
         # Prune unchecked_groups entries for groups that no longer exist
         all_groups = set(self.db.get_all_groups())
@@ -8916,17 +8667,6 @@ window.commstatBouncePin = function(srid) {
         self.config.set_shown_watchlists(pruned)
         # Membership or pin styling may have changed — redraw the map.
         self._save_map_position(callback=self._load_map)
-
-
-    def _populate_groups_menu(self) -> None:
-        """Remove any stale group label actions from the Config menu."""
-        # Indices 0-10 are the permanent Config items (settings actions incl.
-        # Manage Watchlists, the Alerts, Msgs & Videos section with its three
-        # checkboxes, and the Help item); anything beyond is a stale group
-        # label to strip.
-        actions = self.groups_menu.actions()
-        for action in actions[11:]:
-            self.groups_menu.removeAction(action)
 
     def _populate_filter_groups_menu(self) -> None:
         """Populate filter menu with per-group checkboxes above 'Show All Groups'."""
@@ -10325,110 +10065,6 @@ window.commstatBouncePin = function(srid) {
                 self.newsfeed_label.setFont(_ticker_font)
         except Exception as e:
             print(f"[Theme] Font apply failed: {e}")
-
-    def _on_theme_manager(self) -> None:
-        """Open Theme Manager."""
-        dlg = ThemeManagerDialog(self.config, self._apply_theme_styles, self)
-        dlg.exec_()
-
-
-
-
-    def _apply_theme_styles(self) -> None:
-        """Apply changed theme colors to the active UI without rebuilding the whole window."""
-        try:
-            if hasattr(self, "central_widget"):
-                self.central_widget.setStyleSheet(
-                    f"background-color: {self.config.get_color('program_background')};"
-                )
-
-            # Menu bar and menus
-            if hasattr(self, "menubar"):
-                self.menubar.setStyleSheet(self._menubar_qss())
-
-            # Header labels and controls
-            fg_color = self.config.get_color('program_foreground')
-            menu_bg = self.config.get_color('menu_background')
-            menu_fg = self.config.get_color('menu_foreground')
-            if hasattr(self, "label_newsfeed"):
-                self.label_newsfeed.setStyleSheet(f"color: {fg_color};")
-            if hasattr(self, "label_time_prefix"):
-                self.label_time_prefix.setStyleSheet(f"color: {fg_color};")
-            if hasattr(self, "newsfeed_label"):
-                self.newsfeed_label.setStyleSheet(
-                    f"background-color: {self.config.get_color('newsfeed_background')};"
-                    f"color: {self.config.get_color('newsfeed_foreground')};"
-                )
-            if hasattr(self, "time_label"):
-                self.time_label.setStyleSheet(
-                    f"background-color: {self.config.get_color('time_background')};"
-                    f"color: {self.config.get_color('time_foreground')};"
-                )
-            combo_qss = f"""
-                QComboBox {{
-                    background-color: {menu_bg};
-                    color: {menu_fg};
-                    border: 1px solid {menu_fg};
-                    padding: 2px 5px;
-                }}
-                QComboBox::drop-down {{ border: none; }}
-            """
-            if hasattr(self, "feed_combo"):
-                self.feed_combo.setStyleSheet(combo_qss)
-            if hasattr(self, "last20_button"):
-                self.last20_button.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {menu_bg};
-                        color: {menu_fg};
-                        border: 1px solid {menu_fg};
-                        padding: 2px 5px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {menu_fg};
-                        color: {menu_bg};
-                    }}
-                """)
-
-            # Tables
-            if hasattr(self, "statrep_table"):
-                self._setup_table_widget(self.statrep_table, STATREP_HEADERS)
-                self.statrep_table.horizontalHeader().setFixedHeight(30)
-            if hasattr(self, "custom_filter_bar"):
-                self._style_custom_filter_bar()
-            if hasattr(self, "message_table"):
-                self._setup_table_widget(self.message_table, [
-                    "", "Date Time", "Freq", "From", "To", "ID",
-                    self.message_table.horizontalHeaderItem(6).text() if self.message_table.horizontalHeaderItem(6) else "0 Messages"
-                ])
-                self.message_table.horizontalHeader().setFixedHeight(30)
-            if hasattr(self, "contacts_table"):
-                headers = [
-                    "Callsign", "Name", "Address", "City", "State",
-                    "Zip", "Country", "Grid", "Class", "Email", "Image", "Date Added",
-                    "Delete"
-                ]
-                self._setup_table_widget(self.contacts_table, headers)
-
-            # Live feed / map-disabled / alert display
-            if hasattr(self, "feed_text"):
-                self.feed_text.setStyleSheet(
-                    f"background-color: {self.config.get_color('feed_background')};"
-                    f"color: {self.config.get_color('feed_foreground')};"
-                )
-            if hasattr(self, "map_disabled_label"):
-                self.map_disabled_label.setStyleSheet(
-                    f"background-color: {self.config.get_color('feed_background')};"
-                    f"color: {self.config.get_color('feed_foreground')};"
-                    "font-size: 18px; font-weight: bold;"
-                )
-            if hasattr(self, "_load_map"):
-                self._save_map_position(callback=self._load_map)
-
-        except Exception as e:
-            print(f"Theme apply failed: {e}")
-
-
-
 
 def main() -> None:
     """Application entry point."""

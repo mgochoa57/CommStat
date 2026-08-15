@@ -1028,6 +1028,12 @@ class StatRepDialog(QDialog):
         if scope_text and hasattr(self, 'scope_combo'):
             code = scope_code_for_text(scope_text)
             idx = self.scope_combo.findData(code) if code else -1
+            if idx < 0 and code:
+                # Retired scope code (e.g. "5"/"Other Location") isn't a normal
+                # combo choice; add it so a forwarded report keeps its original
+                # scope instead of silently defaulting to index 0.
+                idx = self.scope_combo.count()
+                self.scope_combo.addItem(scope_text, code)
             if idx >= 0:
                 self.scope_combo.setCurrentIndex(idx)
 
@@ -1118,28 +1124,30 @@ class StatRepDialog(QDialog):
             return
         self._update_map_pin_from_worst()
 
+    # Worst-to-best ordering used to pick Map Pin's auto-flip target; Unknown
+    # ranks above Green since it means the category hasn't been confirmed OK.
+    _STATUS_SEVERITY = {"Red": 3, "Yellow": 2, "Unknown": 1, "Green": 0}
+
     def _update_map_pin_from_worst(self) -> None:
-        """Set Map Pin to Red if any other status is Red, else Yellow if any is Yellow."""
-        has_red = False
-        has_yellow = False
+        """Set Map Pin to the worst status among the other 11 categories, so
+        it always tracks them (including down to Green/Unknown when nothing
+        is Red or Yellow anymore, e.g. after All Green/All Gray or manually
+        clearing the last flagged category)."""
+        worst_text = "Green"
+        worst_rank = -1
         for _label, name in STATUS_CATEGORIES:
             if name == "status":
                 continue
             text = self.status_combos[name].currentText()
-            if text == "Red":
-                has_red = True
-                break
-            if text == "Yellow":
-                has_yellow = True
-
-        target = "Red" if has_red else ("Yellow" if has_yellow else None)
-        if target is None:
-            return
+            rank = self._STATUS_SEVERITY.get(text, -1)
+            if rank > worst_rank:
+                worst_rank = rank
+                worst_text = text
 
         map_pin = self.status_combos["status"]
-        if map_pin.currentText() == target:
+        if map_pin.currentText() == worst_text:
             return
-        idx = map_pin.findText(target)
+        idx = map_pin.findText(worst_text)
         if idx >= 0:
             map_pin.setCurrentIndex(idx)
 
