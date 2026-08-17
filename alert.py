@@ -218,7 +218,7 @@ class AlertDialog(QDialog):
         body.addLayout(settings_row)
 
         # ── Target ────────────────────────────────────────────────────────────
-        target_lbl = QLabel("Target:")
+        target_lbl = QLabel("Group:")
         target_lbl.setFont(label_font())
         body.addWidget(target_lbl)
 

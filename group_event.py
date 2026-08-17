@@ -26,7 +26,7 @@ from constants import (
     DEFAULT_COLORS, COLOR_INPUT_TEXT, COLOR_INPUT_BORDER,
     COLOR_DISABLED_BG, COLOR_DISABLED_TEXT,
     COLOR_BTN_GREEN, COLOR_BTN_BLUE, COLOR_BTN_CYAN,
-    RIG_FETCH_DELAY_MS, RIG_FREQ_DELAY_MS,
+    RIG_FREQ_DELAY_MS,
 )
 from id_utils import generate_time_based_id
 from little_gucci import create_verified_ssl_context
@@ -116,7 +116,6 @@ class GroupEventDialog(QDialog):
 
         self.callsign = ""
         self.grid = ""
-        self._grid_user_edited = False
         self.selected_group = ""
         self.event_id = ""
         self._pending_frequency = 0
@@ -244,17 +243,14 @@ class GroupEventDialog(QDialog):
             self._on_rig_changed(current_text)
 
     def _on_rig_changed(self, rig_name: str) -> None:
-        """Handle rig selection change - fetch callsign and grid from JS8Call."""
-        self._grid_user_edited = False
+        """Handle rig selection change - fetch callsign from JS8Call."""
         if not rig_name or "(disconnected)" in rig_name:
             self.callsign = ""
             self.grid = ""
             if hasattr(self, 'from_field'):
                 self.from_field.setText("")
             if hasattr(self, 'grid_field'):
-                self._grid_auto_populating = True
                 self.grid_field.setText("")
-                self._grid_auto_populating = False
             if hasattr(self, 'freq_field'):
                 self.freq_field.setText("")
             return
@@ -269,15 +265,10 @@ class GroupEventDialog(QDialog):
             self.delivery_combo.blockSignals(False)
 
         if rig_name == INTERNET_RIG:
-            callsign, grid, state = self._get_internet_user_settings()
-            self.grid = grid
+            callsign, _grid, state = self._get_internet_user_settings()
             self.callsign = callsign
             if hasattr(self, 'from_field'):
                 self.from_field.setText(callsign)
-            if hasattr(self, 'grid_field'):
-                self._grid_auto_populating = True
-                self.grid_field.setText(grid)
-                self._grid_auto_populating = False
             if hasattr(self, 'freq_field'):
                 self.freq_field.setText("")
             if hasattr(self, 'mode_combo'):
@@ -302,10 +293,6 @@ class GroupEventDialog(QDialog):
                 except TypeError:
                     pass
                 try:
-                    client.grid_received.disconnect(self._on_grid_received)
-                except TypeError:
-                    pass
-                try:
                     client.frequency_received.disconnect(self._on_frequency_received)
                 except TypeError:
                     pass
@@ -313,7 +300,6 @@ class GroupEventDialog(QDialog):
         client = self.tcp_pool.get_client(rig_name)
         if client and client.is_connected():
             client.callsign_received.connect(self._on_callsign_received)
-            client.grid_received.connect(self._on_grid_received)
             client.frequency_received.connect(self._on_frequency_received)
 
             if hasattr(self, 'mode_combo'):
@@ -331,9 +317,8 @@ class GroupEventDialog(QDialog):
                 else:
                     self.freq_field.setText("")
 
-            print(f"[GroupEvent] Requesting callsign, grid, and frequency from {rig_name}")
+            print(f"[GroupEvent] Requesting callsign and frequency from {rig_name}")
             client.get_callsign()
-            QtCore.QTimer.singleShot(RIG_FETCH_DELAY_MS, client.get_grid)
             QtCore.QTimer.singleShot(RIG_FREQ_DELAY_MS, client.get_frequency)
         else:
             print(f"[GroupEvent] Client not available or not connected for {rig_name}")
@@ -378,18 +363,6 @@ class GroupEventDialog(QDialog):
             if hasattr(self, 'from_field'):
                 self.from_field.setText(callsign)
 
-    def _on_grid_received(self, rig_name: str, grid: str) -> None:
-        print(f"[GroupEvent] Grid received from {rig_name}: {grid}")
-        if self.rig_combo.currentText() == rig_name:
-            if self._grid_user_edited:
-                print(f"[GroupEvent] Ignoring grid from {rig_name} — user already edited the field")
-                return
-            self.grid = grid
-            if hasattr(self, 'grid_field'):
-                self._grid_auto_populating = True
-                self.grid_field.setText(grid)
-                self._grid_auto_populating = False
-
     def _on_frequency_received(self, rig_name: str, dial_freq: int) -> None:
         if self.rig_combo.currentText() == rig_name:
             frequency_mhz = dial_freq / 1000000
@@ -401,8 +374,6 @@ class GroupEventDialog(QDialog):
         self.callsign = text.upper()
 
     def _on_grid_field_changed(self, text: str) -> None:
-        if not getattr(self, '_grid_auto_populating', False):
-            self._grid_user_edited = True
         raw = text.strip()
         formatted = raw.upper()
         self.grid = formatted

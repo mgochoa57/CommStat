@@ -2371,7 +2371,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT callsign, name, address, city, state, zip, country, grid, "
-                "class, email, image, insert_date FROM qrz ORDER BY insert_date DESC"
+                "class, email, image, memo, insert_date FROM qrz ORDER BY insert_date DESC"
             )
             return cursor.fetchall()
         return self._execute(op, [])
@@ -6089,9 +6089,10 @@ class MainWindow(QtWidgets.QMainWindow):
         """Create the QRZ contacts table widget spanning both map and message columns."""
         _CONTACTS_HEADERS = [
             "Callsign", "Name", "Address", "City", "State",
-            "Zip", "Country", "Grid", "Class", "Email", "Image", "Date Added",
+            "Zip", "Country", "Grid", "Class", "Email", "Image", "Memo", "Date Added",
             "Delete"
         ]
+        _MEMO_COL = _CONTACTS_HEADERS.index("Memo")
         _DELETE_COL = len(_CONTACTS_HEADERS) - 1
 
         self.contacts_widget = QtWidgets.QWidget(self.central_widget)
@@ -6113,6 +6114,8 @@ class MainWindow(QtWidgets.QMainWindow):
         header.setStretchLastSection(False)
         for col in range(len(_CONTACTS_HEADERS)):
             header.setSectionResizeMode(col, QtWidgets.QHeaderView.Interactive)
+        header.setSectionResizeMode(_MEMO_COL, QtWidgets.QHeaderView.Fixed)
+        self.contacts_table.setColumnWidth(_MEMO_COL, 160)
 
         # Embed a QLineEdit in every cell of row 0 as the filter row
         filter_font = QtGui.QFont("Kode Mono", -1)
@@ -6150,8 +6153,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_contacts_data(self) -> None:
         """Populate the contacts table from the QRZ cache."""
         _IMAGE_COL = 10
-        _DATE_COL = 11
-        _DELETE_COL = 12
+        _MEMO_COL = 11
+        _DATE_COL = 12
+        _DELETE_COL = 13
 
         data_fg = self.config.get_color('data_foreground')
         kode_font = QtGui.QFont("Kode Mono", -1)
@@ -6163,7 +6167,8 @@ class MainWindow(QtWidgets.QMainWindow):
         rows = self.db.get_qrz_contacts()
 
         col_keys = ["callsign", "name", "address", "city", "state",
-                    "zip", "country", "grid", "class", "email", "image", "insert_date"]
+                    "zip", "country", "grid", "class", "email", "image", "memo",
+                    "insert_date"]
 
         self.contacts_table.setHorizontalHeaderItem(
             1, QTableWidgetItem(f"Name   ({len(rows)} Records)")
@@ -6193,6 +6198,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     except (ValueError, TypeError):
                         formatted = str(raw)
                     item = QTableWidgetItem(formatted)
+                elif col == _MEMO_COL:
+                    item = QTableWidgetItem(str(raw))
+                    if raw:
+                        item.setToolTip(str(raw))
                 else:
                     item = QTableWidgetItem(str(raw))
 
@@ -6214,6 +6223,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.contacts_table.setUpdatesEnabled(True)
         self.contacts_table.resizeColumnsToContents()
+        self.contacts_table.setColumnWidth(_MEMO_COL, 160)  # Fixed column; content-resize ignored
 
         # Cap narrow columns that ResizeToContents makes too wide
         _MAX_WIDTHS = {4: 55, 5: 70, 7: 70, 8: 60, 10: 55}
