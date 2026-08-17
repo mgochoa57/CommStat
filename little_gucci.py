@@ -1725,6 +1725,22 @@ class DatabaseManager:
             print(f"Database error: {error}")
             return []
 
+    def get_event_pinned_map(self) -> Dict[int, int]:
+        """Return {statrep.id: pinned} for every Event row (map == '6').
+
+        Used only by the map's Event-marker branch, kept separate from
+        get_statrep_data() so its SELECT/tuple shape (consumed positionally
+        by _populate_table against a fixed header list) never changes.
+        """
+        try:
+            with sqlite3.connect(self.db_path, timeout=10) as connection:
+                cursor = connection.cursor()
+                cursor.execute("SELECT id, pinned FROM statrep WHERE map = '6'")
+                return {row[0]: row[1] for row in cursor.fetchall()}
+        except sqlite3.Error as error:
+            print(f"Database error: {error}")
+            return {}
+
     def get_message_data(
         self,
         groups: List[str],
@@ -3413,6 +3429,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("statrep",      "Status Report",        self._on_statrep),
             ("send_message", "Group Message",         self._on_send_message),
             ("group_alert",  "Alert",                 self._on_group_alert),
+            ("group_event",  "Group Event",           self._on_group_event),
         ]:
             action = QtWidgets.QAction(text, self)
             action.triggered.connect(handler)
@@ -6838,6 +6855,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 user_callsign=_map_callsign
             )
 
+            # Pin-to-Map preference for Event rows, looked up separately so
+            # get_statrep_data()'s SELECT/tuple shape stays untouched.
+            event_pinned = self.db.get_event_pinned_map() if any(str(row[8]) == "6" for row in data) else {}
+
             gridlist = []
             for row in data:
                 callsign = row[3]   # from_callsign
@@ -6948,6 +6969,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     if status == "6":
                         # Event record: distinct outlined/translucent marker, no halo.
+                        # Pin to Map = No suppresses the marker but the row still
+                        # tracks in pin_registry for pan/bounce from the table.
+                        if event_pinned.get(statrep_id, 1) == 0:
+                            pin_registry[str(statrep_id)] = [lat, lon]
+                            continue
                         folium.Marker(
                             location=[lat, lon],
                             icon=self._event_pin_icon(self.config.get_color('condition_purple')),
@@ -8053,6 +8079,16 @@ window.commstatBouncePin = function(srid) {
         """Open Group Alert window."""
         Cls = self._resolve_dialog_class("alert", "AlertDialog")
         dialog = Cls(self.tcp_pool, self.connector_manager, self._trigger_show_alerts, parent=self)
+        dialog.exec_()
+
+    def _on_group_event(self) -> None:
+        """Open Group Event window."""
+        Cls = self._resolve_dialog_class("group_event", "GroupEventDialog")
+        dialog = Cls(
+            self.tcp_pool, self.connector_manager, self,
+            module_background=self.config.get_color('module_background'),
+            data_background=self.config.get_color('data_background')
+        )
         dialog.exec_()
 
     def _on_share_video(self) -> None:
@@ -9235,6 +9271,111 @@ window.commstatBouncePin = function(srid) {
 
         return ("", None)
 
+    def _parse_group_event(
+        self,
+        rig_name: str,
+        message_value: str,
+        from_callsign: str,
+        target: str,
+        grid: str,
+        freq: int,
+        snr: int,
+        utc: str,
+        source: int,
+        global_id: int = 0
+    ) -> tuple:
+        """
+        Parse a Group Event message and save it as an Event-flavored StatRep row.
+
+        Format: ,GRID,6,ID,PIN,MESSAGE,{##}
+        See group_event.py — the scope slot is always literal "6" (not a
+        geographic scope code), and the normal 12-digit condition string is
+        replaced by a single Pin-to-Map digit ("1"/"0"). An Event row is
+        distinguished the same way Part 1/2 create one locally: all 12
+        condition columns hold "6" and scope holds the literal text "Event".
+
+        Args:
+            rig_name: Name of the rig/source
+            message_value: Message text (already {#3}->{##}-normalized)
+            from_callsign: Sender callsign as transmitted, '/' suffix included
+            target: Target @GROUP or callsign
+            grid: Grid square from TCP params or empty for commsrvr
+            freq: Frequency in Hz
+            snr: Signal-to-noise ratio in dB
+            utc: UTC timestamp string "YYYY-MM-DD HH:MM:SS"
+            source: 1=Radio (TCP), 2=Internet (commsrvr), 3=Internet-only marker
+
+        Returns:
+            (message_type, None) where message_type is "statrep" or ""
+        """
+        import re
+
+        match = re.search(r',(.+?)\{##\}', message_value)
+        if not match:
+            return ("", None)
+
+        fields = match.group(1).split(",")
+
+        # Need at least 4 fields: GRID, SCOPE(6), ID, PIN
+        if len(fields) < 4:
+            return ("", None)
+
+        event_grid = fields[0].strip()
+        scope_code = fields[1].strip()
+        event_id = fields[2].strip()
+        pin_flag = fields[3].strip()
+
+        # Scope slot must be the literal Event sentinel "6" — anything else
+        # isn't a Group Event message (shouldn't reach here given the {##}
+        # marker check, but guards against a malformed/foreign message).
+        if scope_code != "6":
+            return ("", None)
+
+        pinned = 1 if pin_flag == "1" else 0
+
+        event_grid = self._resolve_grid(rig_name, event_grid, from_callsign, grid, "EVENT")
+
+        message_raw = ",".join([f for f in fields[4:] if f.strip()]).strip() if len(fields) > 4 else ""
+        message_text = sanitize_ascii(message_raw)
+
+        date_only, _ = parse_message_datetime(utc)
+
+        data = {
+            'datetime': utc,
+            'date': date_only,
+            'freq': freq,
+            'db': snr,
+            'source': source,
+            'sr_id': event_id,
+            'from_callsign': from_callsign,
+            'target': target,
+            'grid': event_grid,
+            'scope': "Event",
+            'map': "6",
+            'power': "6",
+            'water': "6",
+            'med': "6",
+            'telecom': "6",
+            'travel': "6",
+            'internet': "6",
+            'fuel': "6",
+            'food': "6",
+            'crime': "6",
+            'civil': "6",
+            'political': "6",
+            'comments': message_text,
+            'pinned': pinned,
+            'global_id': global_id
+        }
+
+        result = self._insert_message_data(
+            rig_name, "statrep", data, "sr_id", "statrep", from_callsign
+        )
+        if result:
+            return (result, None)
+
+        return ("", None)
+
     def _parse_alert(
         self,
         rig_name: str,
@@ -9747,11 +9888,12 @@ window.commstatBouncePin = function(srid) {
 
         Processes messages in priority order:
         1. Standard STATREP ({&%} or {F%})
-        2. F!304 STATREP (8-digit format)
-        3. F!301 STATREP (9-digit format)
-        4. ALERT ({%%})
-        5. VIDEO ({&&})
-        6. MESSAGE (contains "MSG" keyword)
+        2. Group Event ({##})
+        3. F!304 STATREP (8-digit format)
+        4. F!301 STATREP (9-digit format)
+        5. ALERT ({%%})
+        6. VIDEO ({&&})
+        7. MESSAGE (contains "MSG" keyword)
 
         Args:
             rig_name: Name of the rig/source
@@ -9779,12 +9921,13 @@ window.commstatBouncePin = function(srid) {
         from_callsign = from_callsign.strip().upper()
 
         # Detect Internet-Only markers and normalize
-        if "{&%3}" in message_value or "{%%3}" in message_value or "{^%3}" in message_value:
+        if "{&%3}" in message_value or "{%%3}" in message_value or "{^%3}" in message_value or "{#3}" in message_value:
             source = 3
             message_value = (message_value
                 .replace("{&%3}", "{&%}")
                 .replace("{%%3}", "{%%}")
-                .replace("{^%3}", "{^%}"))
+                .replace("{^%3}", "{^%}")
+                .replace("{#3}", "{##}"))
 
         # PRIORITY 1: Standard STATREP ({&%} or {F%})
         if "{&%}" in message_value or "{F%}" in message_value:
@@ -9792,7 +9935,13 @@ window.commstatBouncePin = function(srid) {
                 rig_name, message_value, from_callsign, target, grid, freq, snr, utc, source, global_id
             )
 
-        # PRIORITY 2: F!304 STATREP
+        # PRIORITY 2: Group Event ({##})
+        if "{##}" in message_value:
+            return self._parse_group_event(
+                rig_name, message_value, from_callsign, target, grid, freq, snr, utc, source, global_id
+            )
+
+        # PRIORITY 3: F!304 STATREP
         if "F!304" in message_value:
             result = self._process_fcode_statrep(
                 rig_name, message_value, from_callsign, target, grid, freq, snr, utc, "F!304", source, global_id
@@ -9800,7 +9949,7 @@ window.commstatBouncePin = function(srid) {
             if result:
                 return (result, None)
 
-        # PRIORITY 3: F!301 STATREP
+        # PRIORITY 4: F!301 STATREP
         if "F!301" in message_value:
             result = self._process_fcode_statrep(
                 rig_name, message_value, from_callsign, target, grid, freq, snr, utc, "F!301", source, global_id
@@ -9808,26 +9957,26 @@ window.commstatBouncePin = function(srid) {
             if result:
                 return (result, None)
 
-        # PRIORITY 4: ALERT ({%%})
+        # PRIORITY 5: ALERT ({%%})
         if "{%%}" in message_value:
             return self._parse_alert(
                 rig_name, message_value, from_callsign, target, freq, snr, utc, source
             )
 
-        # PRIORITY 5: VIDEO ({&&})
+        # PRIORITY 6: VIDEO ({&&})
         if "{&&}" in message_value:
             return self._parse_video(
                 rig_name, message_value, from_callsign, utc, global_id
             )
 
-        # PRIORITY 6: MESSAGE
+        # PRIORITY 7: MESSAGE
         result = self._parse_message(
             rig_name, message_value, from_callsign, target, freq, snr, utc, source
         )
         if result[0]:
             return result
 
-        # PRIORITY 7: Radio-only bare group/direct message (final fallback).
+        # PRIORITY 8: Radio-only bare group/direct message (final fallback).
         # Runs only after every structured pattern above has declined.
         if source == 1:
             return self._parse_group_message(

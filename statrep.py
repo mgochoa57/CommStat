@@ -754,7 +754,7 @@ class StatRepDialog(QDialog):
             for group in all_groups:
                 self.to_combo.addItem(group)
         _apply_combo_popup_style(self.to_combo)
-        _add_header_cell(1, "To:", self.to_combo)
+        _add_header_cell(1, "Group:", self.to_combo)
 
         self.grid_field = QtWidgets.QLineEdit(self.grid)
         self.grid_field.setMaxLength(6)
