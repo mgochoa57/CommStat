@@ -56,6 +56,7 @@ STATUS_GREEN = "1"
 STATUS_YELLOW = "2"
 STATUS_RED = "3"
 STATUS_UNKNOWN = "4"
+STATUS_EVENT = "6"
 
 # Status display names and their codes
 STATUS_OPTIONS = [

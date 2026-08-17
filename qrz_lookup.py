@@ -78,6 +78,7 @@ STATUS_COLORS: Dict[str, tuple] = {
     "2": ("rgb(255, 255, 0)",   "Yellow: Warning"),
     "3": ("rgb(255, 0, 0)",     "Red: Critical"),
     "4": ("rgb(128, 128, 128)", "Gray: Unknown"),
+    "6": ("rgb(128, 0, 255)", "Event"),
 }
 
 
@@ -1419,6 +1420,7 @@ class StatRepDetailDialog(QDialog):
                  condition_yellow: str = "",
                  condition_red: str = "",
                  condition_gray: str = "",
+                 condition_purple: str = "",
                  tcp_pool=None,
                  connector_manager=None,
                  record_list: list = None,
@@ -1450,6 +1452,7 @@ class StatRepDetailDialog(QDialog):
             "2": (condition_yellow or STATUS_COLORS["2"][0], STATUS_COLORS["2"][1]),
             "3": (condition_red    or STATUS_COLORS["3"][0], STATUS_COLORS["3"][1]),
             "4": (condition_gray   or STATUS_COLORS["4"][0], STATUS_COLORS["4"][1]),
+            "6": (condition_purple or STATUS_COLORS["6"][0], STATUS_COLORS["6"][1]),
         }
         self._tcp_pool = tcp_pool
         self._connector_manager = connector_manager

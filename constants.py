@@ -84,6 +84,7 @@ DEFAULT_COLORS: Dict[str, str] = {
     'condition_yellow': '#FFDC78',         # Caution / degraded
     'condition_red': '#DC3534',            # Critical / emergency
     'condition_gray': '#6C757D',           # Unknown / no data
+    'condition_purple': '#8000FF',         # Event marker
     # Data tables
     'data_background': '#F5EDD7',          # Cream was F8F6F4
     'data_foreground': '#000000',

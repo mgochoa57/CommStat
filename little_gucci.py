@@ -1024,6 +1024,7 @@ class CustomWebEnginePage(QWebEnginePage):
                                 condition_yellow=mw.config.get_color('condition_yellow'),
                                 condition_red=mw.config.get_color('condition_red'),
                                 condition_gray=mw.config.get_color('condition_gray'),
+                                condition_purple=mw.config.get_color('condition_purple'),
                                 tcp_pool=mw.tcp_pool,
                                 connector_manager=mw.connector_manager,
                                 record_list_provider=build_record_list,
@@ -6649,6 +6650,18 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return folium.DivIcon(html=html, icon_size=(16, 16), icon_anchor=(8, 8))
 
+    @staticmethod
+    def _event_pin_icon(color: str) -> "folium.DivIcon":
+        """16x16 Event marker: solid 2px outline + translucent (0.40) fill.
+        Stroke is centered on the SVG path, so r=7 (not 8) keeps the outer
+        edge at exactly 16px diameter once the 2px stroke is added."""
+        html = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">'
+            f'<circle cx="8" cy="8" r="7" fill="{color}" fill-opacity="0.40" '
+            f'stroke="{color}" stroke-width="2"/></svg>'
+        )
+        return folium.DivIcon(html=html, icon_size=(16, 16), icon_anchor=(8, 8))
+
     def _add_watchlist_pins_to_map(self, m) -> None:
         """Add persistent halo pins for watchlist members to the folium map,
         in each watchlist's configured pin color and shape.
@@ -6863,13 +6876,15 @@ class MainWindow(QtWidgets.QMainWindow):
                         "1": "Normal",
                         "2": "Advisory",
                         "3": "Emergency",
-                        "4": "Unknown"
+                        "4": "Unknown",
+                        "6": "Event"
                     }.get(status, "Unknown")
                     status_color = {
                         "1": "#39d12f",
                         "2": "#ff9f1a",
                         "3": "#ff3333",
-                        "4": "#c7c7c7"
+                        "4": "#c7c7c7",
+                        "6": "#8000ff"
                     }.get(status, "#c7c7c7")
                     _light_map = self.config.get_map_theme() == "light"
                     _bg = ("linear-gradient(145deg,rgba(248,248,245,.97),rgba(235,235,230,.95))"
@@ -6931,45 +6946,53 @@ class MainWindow(QtWidgets.QMainWindow):
                     if not (US_BBOX[0] <= lat <= US_BBOX[1] and US_BBOX[2] <= lon <= US_BBOX[3]):
                         region_counts["world"] += 1
 
-                    # Color conveys status; radius conveys scope.
-                    if status == "1":
-                        color = "green"
-                    elif status == "2":
-                        color = "orange"
-                    elif status == "3":
-                        color = "red"
+                    if status == "6":
+                        # Event record: distinct outlined/translucent marker, no halo.
+                        folium.Marker(
+                            location=[lat, lon],
+                            icon=self._event_pin_icon(self.config.get_color('condition_purple')),
+                            popup=popup
+                        ).add_to(m)
                     else:
-                        color = "black"
+                        # Color conveys status; radius conveys scope.
+                        if status == "1":
+                            color = "green"
+                        elif status == "2":
+                            color = "orange"
+                        elif status == "3":
+                            color = "red"
+                        else:
+                            color = "black"
 
-                    radius = SCOPE_RADIUS.get(scope, SCOPE_RADIUS_DEFAULT)
+                        radius = SCOPE_RADIUS.get(scope, SCOPE_RADIUS_DEFAULT)
 
-                    # Soft halo goes underneath the solid marker.
-                    # Halo radius grows with scope; solid is always 8px (radius 4).
-                    # interactive=False prevents the halo from stealing clicks from the popup marker.
-                    folium.CircleMarker(
-                        radius=radius,
-                        fill=True,
-                        color=color,
-                        fill_color=color,
-                        fill_opacity=0.22,
-                        opacity=0,
-                        weight=2,
-                        location=[lat, lon],
-                        interactive=False
-                    ).add_to(m)
+                        # Soft halo goes underneath the solid marker.
+                        # Halo radius grows with scope; solid is always 8px (radius 4).
+                        # interactive=False prevents the halo from stealing clicks from the popup marker.
+                        folium.CircleMarker(
+                            radius=radius,
+                            fill=True,
+                            color=color,
+                            fill_color=color,
+                            fill_opacity=0.22,
+                            opacity=0,
+                            weight=2,
+                            location=[lat, lon],
+                            interactive=False
+                        ).add_to(m)
 
-                    # Solid status marker stays on top and remains clickable.
-                    folium.CircleMarker(
-                        radius=3,
-                        fill=True,
-                        color=color,
-                        fill_color=color,
-                        fill_opacity=1.0,
-                        opacity=0,
-                        weight=1,
-                        location=[lat, lon],
-                        popup=popup
-                    ).add_to(m)
+                        # Solid status marker stays on top and remains clickable.
+                        folium.CircleMarker(
+                            radius=3,
+                            fill=True,
+                            color=color,
+                            fill_color=color,
+                            fill_opacity=1.0,
+                            opacity=0,
+                            weight=1,
+                            location=[lat, lon],
+                            popup=popup
+                        ).add_to(m)
                     pin_registry[str(statrep_id)] = [lat, lon]
                 except Exception as e:
                     print(f"Error adding pin for grid {grid}: {e}")
@@ -7389,12 +7412,13 @@ window.commstatBouncePin = function(srid) {
             # Same criteria the map's pin loop applies, so both stay in sync.
             data = [row for row in data if self._custom_filter_match(row)]
 
-        # Status color mapping for values 1-4
+        # Status color mapping for values 1-4, plus 6 (Event)
         status_colors = {
             "1": "condition_green",
             "2": "condition_yellow",
             "3": "condition_red",
-            "4": "condition_gray"
+            "4": "condition_gray",
+            "6": "condition_purple"
         }
         self._populate_table(self.statrep_table, data, status_colors)
 
@@ -7434,6 +7458,7 @@ window.commstatBouncePin = function(srid) {
                     condition_yellow=self.config.get_color('condition_yellow'),
                     condition_red=self.config.get_color('condition_red'),
                     condition_gray=self.config.get_color('condition_gray'),
+                    condition_purple=self.config.get_color('condition_purple'),
                     tcp_pool=self.tcp_pool,
                     connector_manager=self.connector_manager,
                     record_list_provider=build_record_list,
