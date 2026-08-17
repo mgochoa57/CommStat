@@ -927,6 +927,8 @@ class CustomWebEnginePage(QWebEnginePage):
             return
         if 'SameSite' in message:
             return
+        if 'Unrecognized feature' in message:
+            return
         super().javaScriptConsoleMessage(level, message, line, source)
 
     def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
