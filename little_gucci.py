@@ -3429,9 +3429,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for name, text, handler in [
             ("statrep",      "Status Report",        self._on_statrep),
-            ("send_message", "Group Message",         self._on_send_message),
+            ("send_message", "Message",               self._on_send_message),
             ("group_alert",  "Alert",                 self._on_group_alert),
-            ("group_event",  "Group Event",           self._on_group_event),
+            ("group_event",  "Event",                 self._on_group_event),
         ]:
             action = QtWidgets.QAction(text, self)
             action.triggered.connect(handler)
@@ -4904,7 +4904,10 @@ class MainWindow(QtWidgets.QMainWindow):
             date_font = self.alert_date_label.font()
             date_font.setPixelSize(max(10, round(19 * scale)))
             self.alert_date_label.setFont(date_font)
-            _parts = re.split(r'(https?://\S+)', message)
+            # JS8Call transmits/decodes radio traffic in all-caps, so alert
+            # text often arrives as "HTTPS://..." — match case-insensitively
+            # or those links would never get highlighted.
+            _parts = re.split(r'(https?://\S+)', message, flags=re.IGNORECASE)
             _msg_html = "".join(
                 f'<a href="{p.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}"'
                 f' style="color:#00FF00;">'

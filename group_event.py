@@ -30,7 +30,7 @@ from constants import (
 )
 from id_utils import generate_time_based_id
 from little_gucci import create_verified_ssl_context
-from statrep import STATUS_EVENT, _COMMSRVR, _DATAFEED, INTERNET_RIG
+from statrep import STATUS_EVENT, _COMMSRVR, _DATAFEED, INTERNET_RIG, make_uppercase
 from ui_helpers import make_button, label_font, mono_font, apply_standard_dialog_chrome, connect_single
 
 if TYPE_CHECKING:
@@ -62,29 +62,6 @@ _CONDITION_COLUMNS = [
     "map", "power", "water", "med", "telecom", "travel",
     "internet", "fuel", "food", "crime", "civil", "political",
 ]
-
-
-def make_uppercase(field):
-    """Force uppercase input on a QLineEdit."""
-    def to_upper(text):
-        if text != text.upper():
-            pos = field.cursorPosition()
-            field.setText(text.upper())
-            field.setCursorPosition(pos)
-    field.textEdited.connect(to_upper)
-
-
-def get_state_from_connector(connector_manager, rig_name: str) -> str:
-    """Get the state abbreviation from connector table for a specific rig."""
-    if not connector_manager or not rig_name:
-        return ""
-    try:
-        connector = connector_manager.get_connector_by_name(rig_name)
-        if connector and connector.get("state"):
-            return connector["state"].strip().upper()
-    except Exception:
-        pass
-    return ""
 
 
 # =============================================================================
@@ -148,15 +125,6 @@ class GroupEventDialog(QDialog):
         except sqlite3.Error as e:
             print(f"Error reading groups from database: {e}")
         return []
-
-    def _get_default_remarks(self) -> str:
-        if hasattr(self, 'rig_combo'):
-            rig_name = self.rig_combo.currentText()
-            if rig_name and "(disconnected)" not in rig_name:
-                state = get_state_from_connector(self.connector_manager, rig_name)
-                if state:
-                    return state
-        return ""
 
     def _is_internet_only(self) -> bool:
         return hasattr(self, 'rig_combo') and self.rig_combo.currentText() == INTERNET_RIG
@@ -265,7 +233,9 @@ class GroupEventDialog(QDialog):
             self.delivery_combo.blockSignals(False)
 
         if rig_name == INTERNET_RIG:
-            callsign, _grid, state = self._get_internet_user_settings()
+            # Grid is intentionally left as whatever the operator has typed —
+            # unlike StatRep, Group Event never auto-fills it from User Settings.
+            callsign, _, _ = self._get_internet_user_settings()
             self.callsign = callsign
             if hasattr(self, 'from_field'):
                 self.from_field.setText(callsign)
@@ -531,6 +501,7 @@ class GroupEventDialog(QDialog):
         self.pin_combo.setFont(mono_font())
         self.pin_combo.addItem("Yes")
         self.pin_combo.addItem("No")
+        self.pin_combo.setCurrentIndex(1)  # Default to "No"
         _apply_combo_popup_style(self.pin_combo)
         _add_header_cell(3, "Pin to Map:", self.pin_combo)
 
@@ -556,26 +527,31 @@ class GroupEventDialog(QDialog):
         layout.addStretch()
 
         # ── Buttons: Grid Finder | Save Only | Transmit | Cancel ────────
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.setSpacing(8)
+        # Same 5-column stretch grid as Status Report so button width matches
+        # (one column intentionally left empty, on the left, so the row
+        # aligns to the right — Group Event has one fewer button).
+        btn_grid = QtWidgets.QGridLayout()
+        btn_grid.setSpacing(8)
+        for col in range(5):
+            btn_grid.setColumnStretch(col, 1)
 
         self.btn_gf = make_button("Grid Finder", COLOR_BTN_GREEN)
         self.btn_gf.clicked.connect(self._on_grid_finder)
-        btn_row.addWidget(self.btn_gf)
+        btn_grid.addWidget(self.btn_gf, 0, 1)
 
         self.btn_save = make_button("Save Only", COLOR_BTN_CYAN)
         self.btn_save.clicked.connect(self._on_save_only)
-        btn_row.addWidget(self.btn_save)
+        btn_grid.addWidget(self.btn_save, 0, 2)
 
         btn_tx = make_button("Transmit", COLOR_BTN_BLUE)
         connect_single(btn_tx, self._on_transmit)
-        btn_row.addWidget(btn_tx)
+        btn_grid.addWidget(btn_tx, 0, 3)
 
         btn_cancel = make_button("Cancel", _COL_CANCEL)
         btn_cancel.clicked.connect(self.close)
-        btn_row.addWidget(btn_cancel)
+        btn_grid.addWidget(btn_cancel, 0, 4)
 
-        layout.addLayout(btn_row)
+        layout.addLayout(btn_grid)
 
     def _on_commsrvr_error(self, message: str) -> None:
         from qrz_lookup import InternetDeliveryFailureDialog
@@ -625,7 +601,10 @@ class GroupEventDialog(QDialog):
             self.grid_field.setFocus()
             return False
 
-        message = self.message_edit.toPlainText().strip()
+        # Measure the cleaned message (newlines expanded to the 2-char "||"
+        # placeholder) — that's what actually gets transmitted/stored, and it
+        # can run longer than the raw textbox contents.
+        message = self._clean_message(self.message_edit.toPlainText().strip())
         max_len = MESSAGE_MAX_INTERNET if self._is_internet_only() else MESSAGE_MAX_RADIO
         if len(message) > max_len:
             self._show_error(f"Message too long (max {max_len} characters)")
@@ -651,8 +630,7 @@ class GroupEventDialog(QDialog):
 
     def _on_grid_finder_selected(self, grid: str) -> None:
         """Receive grid from Grid Finder, populate the grid field, and close the finder."""
-        self.grid_field.setText(grid)
-        self._on_grid_field_changed(grid)
+        self.grid_field.setText(grid)  # triggers _on_grid_field_changed via textChanged
         if hasattr(self, '_grid_finder'):
             self._grid_finder.close()
 
@@ -788,12 +766,20 @@ class GroupEventDialog(QDialog):
         rig_name = self.rig_combo.currentText()
 
         if rig_name == INTERNET_RIG:
-            callsign, grid, state = self._get_internet_user_settings()
-            if not callsign or not grid or not state:
+            # Only callsign is actually used below — Group Event transmits the
+            # Grid the operator entered in this dialog, not User Settings' grid.
+            callsign, _, _ = self._get_internet_user_settings()
+            if not callsign:
                 self._show_error(
                     "Cannot transmit — User Settings are not fully configured.\n\n"
-                    "Please set your callsign, grid square, and state at:\n"
+                    "Please set your callsign at:\n"
                     "Menu → Config → User Settings"
+                )
+                return
+            if not self._is_commsrvr_enabled():
+                self._show_error(
+                    "Cannot transmit — Off-Grid Mode is enabled.\n\n"
+                    "Switch to Online mode to transmit via the Internet."
                 )
                 return
             self.callsign = callsign
