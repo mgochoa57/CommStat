@@ -503,8 +503,8 @@ def map_f301_digits_to_fields(digits: str) -> dict:
 
     Returns dict with: scope, power, water, telecom, internet, and comment parts
     """
-    # Scope mapping
-    scope = scope_text_for_code(digits[0])
+    # Scope mapping (DB-persisted text, not the UI display text)
+    scope = scope_db_text_for_code(digits[0])
 
     # Remaining 8 digits follow F!304 format
     f304_fields = map_f304_digits_to_fields(digits[1:])
@@ -5482,7 +5482,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Map digits to fields
         if format_code == "F!304":
             field_map = map_f304_digits_to_fields(digits)
-            scope = scope_text_for_code("1")  # F!304 carries no scope digit; always the reporter's own location
+            scope = scope_db_text_for_code("1")  # F!304 carries no scope digit; always the reporter's own location
             status_digits = digits
         else:  # F!301
             field_map = map_f301_digits_to_fields(digits)
@@ -6684,13 +6684,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _event_pin_icon(color: str) -> "folium.DivIcon":
-        """16x16 Event marker: solid 2px outline + translucent (0.40) fill.
-        Stroke is centered on the SVG path, so r=7 (not 8) keeps the outer
-        edge at exactly 16px diameter once the 2px stroke is added."""
+        """16x16 Event marker: solid 3px outline + translucent (0.40) fill.
+        Stroke is centered on the SVG path, so r=6.5 (not 8) keeps the outer
+        edge at exactly 16px diameter once the 3px stroke is added."""
         html = (
             '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">'
-            f'<circle cx="8" cy="8" r="7" fill="{color}" fill-opacity="0.40" '
-            f'stroke="{color}" stroke-width="2"/></svg>'
+            f'<circle cx="8" cy="8" r="6.5" fill="{color}" fill-opacity="0.40" '
+            f'stroke="{color}" stroke-width="3"/></svg>'
         )
         return folium.DivIcon(html=html, icon_size=(16, 16), icon_anchor=(8, 8))
 
@@ -7093,6 +7093,17 @@ class MainWindow(QtWidgets.QMainWindow):
   transform-origin: center !important;
   animation: commstatBounce 1.1s cubic-bezier(.36,.07,.19,.97) forwards !important;
 }
+/* Event pins are DivIcon markers (see _event_pin_icon): the animation target
+   is the inner <svg>, never the marker's own div, because Leaflet positions
+   that div via a translate3d() transform - animating scale directly on it
+   would clobber the marker's position instead of just bouncing it. Folium's
+   DivIcon defaults to className "empty" (not "leaflet-div-icon"), so match
+   on the svg alone rather than assuming a wrapper class. */
+.leaflet-marker-pane svg.commstat-bounce {
+  transform-box: fill-box !important;
+  transform-origin: center !important;
+  animation: commstatBounce 1.1s cubic-bezier(.36,.07,.19,.97) forwards !important;
+}
 </style>
 """
         map_html = map_html.replace('</head>', bounce_css + '</head>')
@@ -7235,11 +7246,15 @@ window.commstatBouncePin = function(srid) {
         if (!obj || !obj._leaflet_id || !obj.eachLayer || !obj.panTo) return;
         obj.panTo([target[0], target[1]]);
         obj.eachLayer(function(layer) {
-            if (!layer.getLatLng || !layer._path) return;
+            if (!layer.getLatLng) return;
+            // CircleMarkers animate their SVG path directly; DivIcon markers
+            // (Event pins) animate their inner <svg>, not the icon div itself,
+            // since the div carries Leaflet's translate3d() position transform.
+            var el = layer._path || (layer._icon && layer._icon.querySelector('svg'));
+            if (!el) return;
             var ll = layer.getLatLng();
             if (Math.abs(ll.lat - target[0]) < 0.0001 &&
                     Math.abs(ll.lng - target[1]) < 0.0001) {
-                var el = layer._path;
                 el.classList.remove('commstat-bounce');
                 void el.getBoundingClientRect();
                 el.classList.add('commstat-bounce');
@@ -9227,8 +9242,8 @@ window.commstatBouncePin = function(srid) {
         comments_raw = ",".join([f for f in fields[4:] if f.strip()]).strip() if len(fields) > 4 else ""
         comments = sanitize_ascii(comments_raw)
 
-        # Map scope
-        scope = scope_text_for_code(prec_num)
+        # Map scope (DB-persisted text, not the UI display text)
+        scope = scope_db_text_for_code(prec_num)
 
         # Insert statrep
         sr_fields = list(srcode[:12])  # Use only first 12 digits
@@ -9307,7 +9322,7 @@ window.commstatBouncePin = function(srid) {
         geographic scope code), and the normal 12-digit condition string is
         replaced by a single Pin-to-Map digit ("1"/"0"). An Event row is
         distinguished the same way Part 1/2 create one locally: all 12
-        condition columns hold "6" and scope holds the literal text "Event".
+        condition columns hold "6" and scope holds the literal text "EVENT".
 
         Args:
             rig_name: Name of the rig/source
@@ -9365,7 +9380,7 @@ window.commstatBouncePin = function(srid) {
             'from_callsign': from_callsign,
             'target': target,
             'grid': event_grid,
-            'scope': "Event",
+            'scope': "EVENT",
             'map': "6",
             'power': "6",
             'water': "6",

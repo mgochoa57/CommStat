@@ -168,7 +168,7 @@ STATREP_HEADERS = [
 # automatically. Everything that resolves existing/incoming text back to a
 # code (scope_code_for_text, SCOPE_RADIUS) already understands both label
 # sets, so no other edit is required.
-SCOPE_USE_NEW_LABELS = False  # flip to True when the rename ships
+SCOPE_USE_NEW_LABELS = True  # flip to True when the rename ships
 
 SCOPE_CODE_TO_TEXT_OLD = {
     "1": "My Location",
@@ -189,6 +189,19 @@ SCOPE_CODE_TO_TEXT_NEW = {
 
 SCOPE_CODE_TO_TEXT = SCOPE_CODE_TO_TEXT_NEW if SCOPE_USE_NEW_LABELS else SCOPE_CODE_TO_TEXT_OLD
 
+# Text actually PERSISTED to the DB/RF wire remarks — deliberately distinct
+# from SCOPE_CODE_TO_TEXT (the combo box picker stays "My QTH"/"Community"/
+# "County"/"Region"; only what gets written on save/receive changed). Every
+# statrep write path (local compose in statrep.py, and RF/commsrvr receipt
+# parsing in little_gucci.py) should resolve through scope_db_text_for_code(),
+# never scope_text_for_code(), so all newly-written rows agree.
+SCOPE_CODE_TO_TEXT_DB = {
+    "1": "MY QTH",
+    "2": "CMNTY",
+    "3": "COUNTY",
+    "4": "REGION",
+}
+
 # Codes no longer offered as a picker choice, but still decodable from
 # legacy DB rows / incoming RF traffic (see scope_text_for_code's fallback).
 # "Other Location" (5) is dropped now, ahead of the full label rename.
@@ -200,28 +213,41 @@ SCOPE_OPTIONS = [
     if code not in SCOPE_RETIRED_CODES
 ]
 
-# Reverse lookup covering BOTH label sets, so stored/incoming text resolves
-# to its code regardless of which set produced it.
+# Reverse lookup covering ALL label sets (old, current-UI, and DB-persisted),
+# so stored/incoming text resolves to its code regardless of which set, or
+# which app version, produced it.
 SCOPE_TEXT_TO_CODE = {}
 for _code, _text in SCOPE_CODE_TO_TEXT_OLD.items():
     SCOPE_TEXT_TO_CODE[_text] = _code
 for _code, _text in SCOPE_CODE_TO_TEXT_NEW.items():
     SCOPE_TEXT_TO_CODE[_text] = _code
+for _code, _text in SCOPE_CODE_TO_TEXT_DB.items():
+    SCOPE_TEXT_TO_CODE[_text] = _code
 del _code, _text
 
 
 def scope_code_for_text(text: str) -> str:
-    """Display text (old OR new label set) -> digit code. "" if unrecognized."""
+    """Display text (any label set: old, current UI, or DB-persisted) ->
+    digit code. "" if unrecognized."""
     return SCOPE_TEXT_TO_CODE.get((text or "").strip(), "")
 
 
 def scope_text_for_code(code: str) -> str:
-    """Digit code -> current display text. Falls back to the retired OLD
-    text for any code the active set no longer defines. "Unknown" if invalid."""
+    """Digit code -> current UI display text (for the combo box / console
+    debug output). Falls back to the retired OLD text for any code the
+    active set no longer defines. "Unknown" if invalid. NOT for DB writes —
+    use scope_db_text_for_code() there."""
     return SCOPE_CODE_TO_TEXT.get(code, SCOPE_CODE_TO_TEXT_OLD.get(code, "Unknown"))
 
 
-# Map-pin radius (px) by scope CODE, so both label sets resolve consistently.
+def scope_db_text_for_code(code: str) -> str:
+    """Digit code -> text to persist to the DB / RF wire remarks. Falls back
+    to the current UI text for any code the DB set doesn't define (e.g. the
+    retired code "5", which has no successor)."""
+    return SCOPE_CODE_TO_TEXT_DB.get(code, scope_text_for_code(code))
+
+
+# Map-pin radius (px) by scope CODE, so every label set resolves consistently.
 SCOPE_RADIUS_BY_CODE = {
     "1": 3,
     "2": 10,
@@ -231,12 +257,15 @@ SCOPE_RADIUS_BY_CODE = {
 }
 SCOPE_RADIUS_DEFAULT = 3  # unknown/missing scope, treated like "My Location"/"My QTH"
 
-# Back-compat TEXT-keyed view built from BOTH label sets, since map rows key
-# off whatever raw text is stored in the DB (old rows keep old text forever).
+# Back-compat TEXT-keyed view built from ALL label sets, since map rows key
+# off whatever raw text is stored in the DB (old rows keep whichever text
+# was current when they were written, forever).
 SCOPE_RADIUS = {}
 for _code, _text in SCOPE_CODE_TO_TEXT_OLD.items():
     SCOPE_RADIUS[_text] = SCOPE_RADIUS_BY_CODE[_code]
 for _code, _text in SCOPE_CODE_TO_TEXT_NEW.items():
+    SCOPE_RADIUS[_text] = SCOPE_RADIUS_BY_CODE[_code]
+for _code, _text in SCOPE_CODE_TO_TEXT_DB.items():
     SCOPE_RADIUS[_text] = SCOPE_RADIUS_BY_CODE[_code]
 del _code, _text
 
