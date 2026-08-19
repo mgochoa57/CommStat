@@ -2702,7 +2702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.db = db
 
         self._sound_player = SoundPlayer(config)
-        self._pending_sound_types: set = set()
+        self._pending_sound_type: Optional[str] = None
         self._sound_debounce_timer = QTimer(self)
         self._sound_debounce_timer.setSingleShot(True)
         self._sound_debounce_timer.timeout.connect(self._play_pending_sound)
@@ -10080,21 +10080,16 @@ window.commstatBouncePin = function(srid) {
 
     @QtCore.pyqtSlot(str)
     def _queue_notification_sound(self, msg_type: str) -> None:
-        """Accumulate sound type and (re)start debounce timer."""
-        self._pending_sound_types.add(msg_type)
+        """Remember the most recently processed record's type and (re)start debounce timer."""
+        self._pending_sound_type = msg_type
         self._sound_debounce_timer.start(self._SOUND_DEBOUNCE_MS)
 
     def _play_pending_sound(self) -> None:
-        """Play the highest-priority enabled pending sound, then clear the queue."""
-        for msg_type in ("alert", "message", "statrep"):
-            if msg_type in self._pending_sound_types:
-                # play() no-ops if this event's sound is disabled, so keep
-                # scanning so a disabled high-priority type can't mute an
-                # enabled lower-priority one.
-                if self.config.get_sound_enabled(msg_type):
-                    self._sound_player.play(msg_type)
-                    break
-        self._pending_sound_types.clear()
+        """Play the sound for the last record processed in this burst, then clear."""
+        msg_type = self._pending_sound_type
+        if msg_type and self.config.get_sound_enabled(msg_type):
+            self._sound_player.play(msg_type)
+        self._pending_sound_type = None
 
     def _on_sound_settings(self) -> None:
         """Open Sound Settings dialog (per-event sound file + enable)."""
