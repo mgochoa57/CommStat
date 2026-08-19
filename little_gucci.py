@@ -4000,13 +4000,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         header = table.horizontalHeader()
         header.setMinimumSectionSize(10)
-        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        # Interactive (not ResizeToContents) so the user can drag columns
+        # narrower/wider after the initial content-based fit — see the
+        # one-time resizeColumnsToContents() call in _populate_table.
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
         header.resizeSection(0, 10)
         # Explicitly mark the last column Stretch rather than relying on
-        # setStretchLastSection() to override its ResizeToContents mode —
-        # on Linux/X11 that combo can misattribute the extra width to an
-        # earlier column instead of the last one.
+        # setStretchLastSection() to override its resize mode — on Linux/X11
+        # that combo can misattribute the extra width to an earlier column
+        # instead of the last one.
         header.setSectionResizeMode(len(headers) - 1, QtWidgets.QHeaderView.Stretch)
         header.setStretchLastSection(True)
         table.verticalHeader().setVisible(False)
@@ -8670,6 +8673,17 @@ window.commstatBouncePin = function(srid) {
         # Alert table (non-statrep, non-message): sort by first column descending
         if not is_message_table and not is_statrep_table:
             table.sortItems(0, QtCore.Qt.DescendingOrder)
+
+        # One-time content-based fit for the Interactive middle columns (col 0
+        # is Fixed, the last column is Stretch — both skipped here). Only runs
+        # once per table so a user's manual drag-narrow afterward sticks
+        # across future refreshes instead of being recomputed away.
+        if (is_message_table or is_statrep_table) and table.rowCount() > 0:
+            sized_attr = "_message_table_sized" if is_message_table else "_statrep_table_sized"
+            if not getattr(self, sized_attr, False):
+                for col in range(1, table.columnCount() - 1):
+                    table.resizeColumnToContents(col)
+                setattr(self, sized_attr, True)
 
         if is_message_table:
             count = table.rowCount()
