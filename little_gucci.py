@@ -693,62 +693,6 @@ class TileSchemeHandler(QWebEngineUrlSchemeHandler):
 
 
 # =============================================================================
-# Large Map Breakout Window
-# =============================================================================
-
-class LargeMapDialog(QtWidgets.QDialog):
-    """Non-modal window showing a larger version of the main map."""
-
-    _ASPECT_RATIO = 16 / 9  # 800 x 450
-
-    def __init__(self, html: str, main_window, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("CommStat — Map")
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        # Why: without this, closing the dialog only hides it — the
-        # QWebEngineView and its renderer subprocess stay alive holding shm fds.
-        self.setAttribute(Qt.WA_DeleteOnClose, True)
-        self.resize(800, 450)
-        if os.path.exists("radiation-32.png"):
-            self.setWindowIcon(QtGui.QIcon("radiation-32.png"))
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.map_view = QWebEngineView()
-        self.map_view.setPage(CustomWebEnginePage(main_window))
-        layout.addWidget(self.map_view)
-
-        if html:
-            self.map_view.setHtml(html, QUrl("http://localhost/"))
-
-    def resizeEvent(self, event):
-        new_w = event.size().width()
-        new_h = event.size().height()
-        if new_w / max(new_h, 1) != self._ASPECT_RATIO:
-            # Anchor to whichever dimension changed more
-            if abs(new_w - event.oldSize().width()) >= abs(new_h - event.oldSize().height()):
-                self.resize(new_w, round(new_w / self._ASPECT_RATIO))
-            else:
-                self.resize(round(new_h * self._ASPECT_RATIO), new_h)
-        super().resizeEvent(event)
-
-    def update_map(self, html: str) -> None:
-        self.map_view.setHtml(html, QUrl("http://localhost/"))
-
-    def closeEvent(self, event):
-        # Tear down the QWebEngineView so the Chromium renderer subprocess and
-        # its shm fds are released. Without this, repeated open/close of the
-        # large-map window leaks renderer resources until EMFILE.
-        try:
-            self.map_view.setPage(None)
-            self.map_view.deleteLater()
-        except Exception:
-            pass
-        super().closeEvent(event)
-
-
-# =============================================================================
 # Clickable Label for Slideshow
 # =============================================================================
 
@@ -2562,6 +2506,25 @@ class DatabaseManager:
             return None
         return self._execute(op, None)
 
+    def get_all_videos(self) -> List[Tuple[int, str, str, str, str, str]]:
+        """Get all video rows (id, title, from_callsign, target, date, url),
+        oldest first."""
+        def op(cursor, conn):
+            cursor.execute(
+                "SELECT id, title, from_callsign, target, date, url "
+                "FROM videos ORDER BY datetime ASC"
+            )
+            return [(r[0], r[1] or "", r[2] or "", r[3] or "", r[4] or "", r[5] or "")
+                    for r in cursor.fetchall()]
+        return self._execute(op, [])
+
+    def delete_video(self, video_id: int) -> None:
+        """Delete a video row by id."""
+        def op(cursor, conn):
+            cursor.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+            conn.commit()
+        self._execute(op)
+
     def mark_video_played(self, video_id: int) -> None:
         """Mark a video row as played."""
         def op(cursor, conn):
@@ -3726,9 +3689,8 @@ class MainWindow(QtWidgets.QMainWindow):
         add_section_header(self.tools_menu, "CommStat Utilities")
         create_action(self.tools_menu, "Brevity", "brevity", self._on_brevity_generator)
         create_action(self.tools_menu, "Grid Finder", "grid_finder", self._on_grid_finder)
-        create_action(self.tools_menu, "Large Map...", "large_map", self._on_large_map)
-        create_action(self.tools_menu, "QRZ Contacts", "qrz_contacts", self._on_qrz_contacts_menu)
         create_action(self.tools_menu, "Data Manager", "data_manager", self._on_data_manager)
+        create_action(self.tools_menu, "Video Manager", "video_manager", self._on_video_manager)
 
         self._fix_plain_menu_indent(self.tools_menu)
 
@@ -4074,8 +4036,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Each box names itself with its placeholder rather than carrying a
         # separate label - the bar is already near the window's width, and the
         # placeholder disappears exactly when the typed value makes it redundant.
-        # Boxes are wide (140px) because each holds a comma-separated list;
-        # longer lists scroll horizontally within the box.
+        # Boxes are wide (140px) because each holds a comma- or space-
+        # separated list; longer lists scroll horizontally within the box.
         # No tooltips here - the rules are documented in the map's Filter > Help.
         _FIELDS = [("from", "From"), ("to", "To"), ("id", "ID"), ("grid", "Grid")]
         self._cf_inputs: Dict[str, QtWidgets.QLineEdit] = {}
@@ -4331,10 +4293,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _custom_filter_match(self, row) -> bool:
         """True if a statrep row passes the Custom Filtering bar's criteria.
 
-        Within one box, comma-separated terms are always OR'd ("N0DDK, W1ABC"
-        matches either). Across boxes, the bar's AND/OR toggle decides. Empty
-        boxes impose no constraint; an entirely empty bar matches everything.
-        All matching is case-insensitive substring."""
+        Within one box, comma- or space-separated terms are always OR'd
+        ("N0DDK, W1ABC" or "N0DDK W1ABC" matches either). Across boxes, the
+        bar's AND/OR toggle decides. Empty boxes impose no constraint; an
+        entirely empty bar matches everything. All matching is
+        case-insensitive substring."""
         if self._map_filter_state != "custom":
             return True
         pairs = [
@@ -4345,7 +4308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         results = []
         for raw, field in pairs:
-            terms = [t.strip().upper() for t in raw.split(",") if t.strip()]
+            terms = [t for t in re.split(r"[,\s]+", raw.strip().upper()) if t]
             if not terms:
                 continue          # empty (or comma-only) box = no constraint
             hay = str(field or "").upper()
@@ -7039,7 +7002,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         ).add_to(m)
                     pin_registry[str(statrep_id)] = [lat, lon]
                 except Exception as e:
-                    print(f"Error adding pin for grid {grid}: {e}")
+                    print(f"Error adding pin for grid {grid} (statrep_id {statrep_id}): {e}")
 
         except Exception as e:
             print(f"Error loading map data: {e}")
@@ -7291,8 +7254,6 @@ window.commstatBouncePin = function(srid) {
         if getattr(self, '_current_view_mode', '') != "videos":
             self._update_map_background_color()
             self.map_widget.setHtml(self._last_map_html, QUrl("http://localhost/"))
-        if getattr(self, '_large_map_dlg', None) and self._large_map_dlg.isVisible():
-            self._large_map_dlg.update_map(self._last_map_html)
         self.map_loaded = True
 
         if callback:
@@ -7603,6 +7564,12 @@ window.commstatBouncePin = function(srid) {
     def _on_data_manager(self) -> None:
         """Open Data Manager dialog (Tools menu)."""
         Cls = self._resolve_dialog_class("data_manager", "DataManagerDialog")
+        dlg = Cls(self.db, parent=self)
+        dlg.exec_()
+
+    def _on_video_manager(self) -> None:
+        """Open Video Manager dialog (Tools menu)."""
+        Cls = self._resolve_dialog_class("video_manager", "VideoManagerDialog")
         dlg = Cls(self.db, parent=self)
         dlg.exec_()
 
@@ -8469,21 +8436,6 @@ window.commstatBouncePin = function(srid) {
             self.feed_text.hide()
         else:
             self.feed_text.show()
-
-    def _on_large_map(self) -> None:
-        """Open or raise the large map breakout window."""
-        if getattr(self, '_large_map_dlg', None) and self._large_map_dlg.isVisible():
-            self._large_map_dlg.raise_()
-            self._large_map_dlg.activateWindow()
-            return
-        html = getattr(self, '_last_map_html', '')
-        self._large_map_dlg = LargeMapDialog(html, main_window=self, parent=self)
-        # Drop our reference when the dialog is destroyed so a stale handle
-        # doesn't keep the QWebEngineView (and its renderer) alive.
-        self._large_map_dlg.destroyed.connect(
-            lambda *_: setattr(self, '_large_map_dlg', None)
-        )
-        self._large_map_dlg.show()
 
     def _map_pane_is_free(self) -> bool:
         """True while the pane is showing a region map.

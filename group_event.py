@@ -25,17 +25,58 @@ from PyQt5.QtWidgets import QMessageBox, QDialog
 from constants import (
     DEFAULT_COLORS, COLOR_INPUT_TEXT, COLOR_INPUT_BORDER,
     COLOR_DISABLED_BG, COLOR_DISABLED_TEXT,
-    COLOR_BTN_GREEN, COLOR_BTN_BLUE, COLOR_BTN_CYAN,
+    COLOR_BTN_GREEN, COLOR_BTN_BLUE, COLOR_BTN_CYAN, COLOR_BTN_HELP,
     RIG_FREQ_DELAY_MS,
 )
 from id_utils import generate_time_based_id
 from little_gucci import create_verified_ssl_context
 from statrep import STATUS_EVENT, _COMMSRVR, _DATAFEED, INTERNET_RIG, make_uppercase
-from ui_helpers import make_button, label_font, mono_font, apply_standard_dialog_chrome, connect_single
+from ui_helpers import (
+    make_button, label_font, mono_font, apply_standard_dialog_chrome,
+    connect_single, show_help_dialog,
+)
 
 if TYPE_CHECKING:
     from js8_tcp_client import TCPConnectionPool
     from connector_manager import ConnectorManager
+
+
+# ── Help content ──────────────────────────────────────────────────────────────
+# Lives beside the feature it documents. Chrome comes from ui_helpers.
+
+_HELP_HTML = """
+<div style="font-family: Roboto; font-size: 13px; color: #333333;">
+
+<p>An Event is an ongoing, developing, or planned situation that has the
+potential to escalate into civil unrest, large-scale protests, rioting,
+violence, anarchy, or even a full-blown revolution.</p>
+
+<p>Events are location-based and must be associated with a Maidenhead grid
+square so they can be displayed geographically within CommStat. Examples
+might include a planned demonstration, a growing protest, a major political
+gathering, a developing security situation, or any other activity that may
+become significant enough to monitor.</p>
+
+<p>When creating an Event, the user has the option to pin it to the map.
+Pinning is not automatic. A pinned Event remains visible on CommStat maps
+until users choose to remove it. This is useful for situations that may
+continue developing over several hours, days, or even weeks and need to
+remain easy to find and monitor.</p>
+
+<p>In other words, pinning an Event tells CommStat, &ldquo;Keep this on the
+map&mdash;we&rsquo;re still watching it.&rdquo; Events that are not pinned
+can still be reported without becoming a persistent map item.</p>
+
+<p>Think of an Event as something happening&mdash;or expected to
+happen&mdash;at a particular location that may deserve continued
+attention.</p>
+
+<p>If the situation progresses to a Zombie Apocalypse, Alien Invasion, World
+War, collapse of civilization, or another minor inconvenience of similar
+magnitude, create a Status Report instead.</p>
+
+</div>
+"""
 
 
 # =============================================================================
@@ -56,6 +97,7 @@ _DATA_BG    = DEFAULT_COLORS.get("data_background",     "#F8F6F4")
 _PANEL_BG   = DEFAULT_COLORS.get("module_background",   "#DDDDDD")
 _PANEL_FG   = DEFAULT_COLORS.get("module_foreground",   "#000000")
 _COL_CANCEL = "#555555"
+_COL_PINK   = COLOR_BTN_HELP
 
 # All 12 statrep condition columns, all forced to STATUS_EVENT for an Event.
 _CONDITION_COLUMNS = [
@@ -403,6 +445,19 @@ class GroupEventDialog(QDialog):
         )
         layout.addWidget(title)
 
+        subtitle = QtWidgets.QLabel(
+            "An Event is an ongoing, developing, or planned situation that could "
+            "escalate into civil unrest, protests, rioting, violence, anarchy, or revolution."
+        )
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet(
+            f"QLabel {{ color: {_PANEL_FG}; background-color: transparent;"
+            f" font-family: 'Kode Mono'; font-size: 11px; font-style: italic;"
+            f" padding: 2px 10px 4px 10px; }}"
+        )
+        layout.addWidget(subtitle)
+
         # ── Settings row: Rig | Mode | Freq | Delivery ──────────────────
         def _labeled_col(lbl_text, ctrl):
             col = QtWidgets.QVBoxLayout()
@@ -526,14 +581,16 @@ class GroupEventDialog(QDialog):
 
         layout.addStretch()
 
-        # ── Buttons: Grid Finder | Save Only | Transmit | Cancel ────────
-        # Same 5-column stretch grid as Status Report so button width matches
-        # (one column intentionally left empty, on the left, so the row
-        # aligns to the right — Group Event has one fewer button).
+        # ── Buttons: Help | Grid Finder | Save Only | Transmit | Cancel ─
+        # Same 5-column stretch grid as Status Report so button width matches.
         btn_grid = QtWidgets.QGridLayout()
         btn_grid.setSpacing(8)
         for col in range(5):
             btn_grid.setColumnStretch(col, 1)
+
+        self.help_btn = make_button("Help", _COL_PINK)
+        self.help_btn.clicked.connect(self._on_help_clicked)
+        btn_grid.addWidget(self.help_btn, 0, 0)
 
         self.btn_gf = make_button("Grid Finder", COLOR_BTN_GREEN)
         self.btn_gf.clicked.connect(self._on_grid_finder)
@@ -552,6 +609,10 @@ class GroupEventDialog(QDialog):
         btn_grid.addWidget(btn_cancel, 0, 4)
 
         layout.addLayout(btn_grid)
+
+    def _on_help_clicked(self) -> None:
+        """Show a styled help dialog explaining what an Event is and how pinning works."""
+        show_help_dialog(self, "Group Event Help", _HELP_HTML, width=470, height=430)
 
     def _on_commsrvr_error(self, message: str) -> None:
         from qrz_lookup import InternetDeliveryFailureDialog

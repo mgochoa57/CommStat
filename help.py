@@ -156,8 +156,8 @@ your Filter menu choices.</p>
 <li><b>Partial matches count.</b> Typing <b>EM8</b> in Grid finds EM83CV,
     EM84KQ and so on. Capitals do not matter &mdash; the boxes uppercase what
     you type automatically.</li>
-<li><b>Commas mean "or" inside one box.</b> <b>N0DDK, W1ABC</b> in the From box
-    finds either station.</li>
+<li><b>Commas or spaces mean "or" inside one box.</b> <b>N0DDK, W1ABC</b> or
+    <b>N0DDK W1ABC</b> in the From box finds either station.</li>
 <li><b>The AND / OR dropdown joins the boxes.</b> The word shown between
     the boxes changes to match, so the bar always reads as a sentence.</li>
 <li><b>Empty boxes are ignored.</b> Leave all four empty and you get every
@@ -203,8 +203,8 @@ your Filter menu choices.</p>
 </tr>
 <tr bgcolor="#F2F2F2">
   <td>From = <b>N0DDK, W1ABC</b><br>Grid = <b>EM83</b><br>with <b>AND</b></td>
-  <td>Commas still mean "or" inside the box: either station, but only when it
-      is in grid EM83.</td>
+  <td>Commas or spaces still mean "or" inside the box: either station, but
+      only when it is in grid EM83.</td>
 </tr>
 </table>
 
