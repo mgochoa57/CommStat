@@ -8,7 +8,7 @@ Group Event Dialog for CommStat
 Allows creating and transmitting AMRRON Events via JS8Call.
 
 An Event is a StatRep record distinguished by all 12 condition columns set to
-STATUS_EVENT ("6") and scope set to the literal text "Event" — see statrep.py.
+STATUS_EVENT ("6") and scope set to the literal text "EVENT" — see statrep.py.
 """
 
 import re
@@ -694,7 +694,7 @@ class GroupEventDialog(QDialog):
                     d['callsign'],
                     d['target'],
                     d['grid'],
-                    "Event",
+                    "EVENT",
                     d['map'],
                     d['power'],
                     d['water'],

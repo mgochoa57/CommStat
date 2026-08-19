@@ -29,7 +29,7 @@ from constants import (
     COLOR_DISABLED_BG, COLOR_DISABLED_TEXT,
     COLOR_BTN_GREEN, COLOR_BTN_BLUE, COLOR_BTN_CYAN, COLOR_BTN_HELP,
     RIG_FETCH_DELAY_MS, RIG_FREQ_DELAY_MS,
-    SCOPE_OPTIONS, scope_code_for_text,
+    SCOPE_OPTIONS, scope_code_for_text, scope_db_text_for_code,
 )
 from id_utils import generate_time_based_id
 from little_gucci import create_verified_ssl_context
@@ -1272,7 +1272,7 @@ class StatRepDialog(QDialog):
             'callsign': self.callsign.upper(),
             'target': '@' + self.to_combo.currentText().upper(),
             'grid': self.grid.upper(),
-            'scope_text': self.scope_combo.currentText(),
+            'scope_text': scope_db_text_for_code(self.scope_combo.currentData()),
             'date': now.toString("yyyy-MM-dd HH:mm:ss"),
             'date_only': now.toString("yyyy-MM-dd"),
             'map': values["status"],
