@@ -24,7 +24,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPlainTextEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QMessageBox, QAbstractItemView, QWidget,
+    QHeaderView, QMessageBox, QAbstractItemView, QWidget, QCheckBox,
 )
 
 from constants import (
@@ -55,6 +55,7 @@ _WIN_W = 640
 _WIN_H = 480
 
 _TABLE_COLS = ["Callsign", "Name", "City", "State", "Grid"]
+_LIST_COLS = ["Active"] + _TABLE_COLS
 
 # QThreads started for a lookup are parked here so closing the dialog
 # mid-lookup never destroys a still-running QThread.
@@ -320,8 +321,8 @@ class WatchlistMembersDialog(QDialog):
         body.addWidget(self.bulk_panel)
 
         # ── Table ─────────────────────────────────────────────────────────────
-        self.table = QTableWidget(0, len(_TABLE_COLS))
-        self.table.setHorizontalHeaderLabels(_TABLE_COLS)
+        self.table = QTableWidget(0, len(_LIST_COLS))
+        self.table.setHorizontalHeaderLabels(_LIST_COLS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -331,11 +332,12 @@ class WatchlistMembersDialog(QDialog):
         self.table.setAlternatingRowColors(False)
 
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)   # Active
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)   # Callsign
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)            # Name
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)            # City
+        hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)   # State
+        hh.setSectionResizeMode(5, QHeaderView.ResizeToContents)   # Grid
 
         self.table.setStyleSheet(
             f"QTableWidget {{ background-color:{_DATA_BG}; alternate-background-color:{_DATA_BG};"
@@ -383,6 +385,20 @@ class WatchlistMembersDialog(QDialog):
         for m in members:
             row = self.table.rowCount()
             self.table.insertRow(row)
+
+            active_cb = QCheckBox()
+            active_cb.setChecked(m["active"])
+            active_cb.toggled.connect(
+                lambda checked, member_id=m["id"]: self._on_active_toggled(member_id, checked)
+            )
+            active_cell = QWidget()
+            active_cell.setStyleSheet("background-color: transparent;")
+            active_layout = QHBoxLayout(active_cell)
+            active_layout.setContentsMargins(0, 0, 0, 0)
+            active_layout.addWidget(active_cb)
+            active_layout.setAlignment(Qt.AlignCenter)
+            self.table.setCellWidget(row, 0, active_cell)
+
             values = [m["callsign"], m["name"], m["city"], m["state"], m["grid"]]
             for col, val in enumerate(values):
                 item = QTableWidgetItem(val)
@@ -390,9 +406,12 @@ class WatchlistMembersDialog(QDialog):
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 if col == 0:
                     item.setData(Qt.UserRole, m["id"])
-                self.table.setItem(row, col, item)
+                self.table.setItem(row, col + 1, item)
 
         self._on_selection_changed()
+
+    def _on_active_toggled(self, member_id: int, checked: bool) -> None:
+        self.db.set_watchlist_member_active(self.watchlist_id, member_id, checked)
 
     # ── Selection ──────────────────────────────────────────────────────────────
 
@@ -613,7 +632,7 @@ class WatchlistMembersDialog(QDialog):
         row = self.table.currentRow()
         if row < 0:
             return
-        item = self.table.item(row, 0)
+        item = self.table.item(row, 1)
         if item is None:
             return
         cs = item.text()

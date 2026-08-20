@@ -21,6 +21,7 @@ import sys
 import os
 import io
 import re
+import csv
 import base64
 import json
 import faulthandler
@@ -168,6 +169,12 @@ SOLAR_IMAGE_DIALOGS = [
      '<a href="https://www.hamqsl.com/solar.html">View more at hamqsl.com</a>',
      "Loading solar conditions...", "Failed to load solar data"),
 ]
+
+# qrz columns left out of Tools > Export CSVs: internal bookkeeping or not
+# useful outside the app.
+QRZ_EXPORT_EXCLUDED_COLUMNS = {
+    "active", "effdate", "expdate", "image", "areacode", "memo", "moddate", "grid_override",
+}
 
 # Live weather map links opened in the user's browser from the Tools menu.
 WEATHER_MAP_LINKS = [
@@ -2144,7 +2151,7 @@ class DatabaseManager:
         def op(cursor, conn):
             cursor.execute(
                 "SELECT q.id, q.callsign, q.name, q.city, q.state, "
-                "COALESCE(NULLIF(q.grid_override, ''), q.grid) "
+                "COALESCE(NULLIF(q.grid_override, ''), q.grid), wm.active "
                 "FROM watchlistMembers wm JOIN qrz q ON q.id = wm.member_id "
                 "WHERE wm.watchlist_id = ? ORDER BY q.callsign",
                 (watchlist_id,)
@@ -2157,6 +2164,7 @@ class DatabaseManager:
                     "city": row[3] or "",
                     "state": row[4] or "",
                     "grid": row[5] or "",
+                    "active": bool(row[6]),
                 }
                 for row in cursor.fetchall()
             ]
@@ -2186,6 +2194,18 @@ class DatabaseManager:
             cursor.execute(
                 "DELETE FROM watchlistMembers WHERE watchlist_id = ? AND member_id = ?",
                 (watchlist_id, member_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        return self._execute(op, False)
+
+    def set_watchlist_member_active(self, watchlist_id: int, member_id: int, active: bool) -> bool:
+        """Set a watchlist member's Active flag — controls whether they show
+        on the map when their watchlist is checked under Watchlist Overlay."""
+        def op(cursor, conn):
+            cursor.execute(
+                "UPDATE watchlistMembers SET active = ? WHERE watchlist_id = ? AND member_id = ?",
+                (1 if active else 0, watchlist_id, member_id)
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -2239,9 +2259,10 @@ class DatabaseManager:
 
     def get_watchlist_pins(self, watchlist_names: List[str]) -> List[Tuple]:
         """Get (callsign, lat, lon, grid, grid_override, object_color, object_shape)
-        for the members of the named watchlists. A callsign on two shown
+        for the active members of the named watchlists. A callsign on two shown
         watchlists with different object styles returns one row per style. The
-        joins drop members whose watchlist or qrz contact was deleted."""
+        joins drop members whose watchlist or qrz contact was deleted, and
+        inactive members (wm.active = 0) are excluded from the overlay."""
         if not watchlist_names:
             return []
         def op(cursor, conn):
@@ -2251,7 +2272,8 @@ class DatabaseManager:
                 "w.object_color, w.object_shape "
                 "FROM watchlistMembers wm "
                 "JOIN qrz q ON q.id = wm.member_id "
-                f"JOIN watchlists w ON w.id = wm.watchlist_id AND w.name IN ({placeholders})",
+                f"JOIN watchlists w ON w.id = wm.watchlist_id AND w.name IN ({placeholders}) "
+                "WHERE wm.active = 1",
                 watchlist_names
             )
             return cursor.fetchall()
@@ -2338,6 +2360,86 @@ class DatabaseManager:
                 "class, email, image, memo, insert_date FROM qrz ORDER BY insert_date DESC"
             )
             return cursor.fetchall()
+        return self._execute(op, [])
+
+    def get_statrep_export_data(self) -> Tuple[List[str], List[Tuple]]:
+        """Return (column_names, rows) for every statrep row, for CSV export.
+        Excludes the memo column."""
+        def op(cursor, conn):
+            cursor.execute("SELECT * FROM statrep ORDER BY datetime DESC")
+            columns = [d[0] for d in cursor.description]
+            keep_indices = [i for i, c in enumerate(columns) if c != "memo"]
+            kept_columns = [columns[i] for i in keep_indices]
+            rows = [tuple(row[i] for i in keep_indices) for row in cursor.fetchall()]
+            return kept_columns, rows
+        return self._execute(op, ([], []))
+
+    def get_qrz_export_data(self) -> Tuple[List[str], List[Tuple]]:
+        """Return (column_names, rows) for every qrz row, for CSV export.
+
+        Excludes QRZ_EXPORT_EXCLUDED_COLUMNS.
+        """
+        def op(cursor, conn):
+            cursor.execute("SELECT * FROM qrz")
+            columns = [d[0] for d in cursor.description]
+            keep_indices = [i for i, c in enumerate(columns) if c not in QRZ_EXPORT_EXCLUDED_COLUMNS]
+            kept_columns = [columns[i] for i in keep_indices]
+            rows = [tuple(row[i] for i in keep_indices) for row in cursor.fetchall()]
+            return kept_columns, rows
+        return self._execute(op, ([], []))
+
+    def get_watchlist_members_export_data(self) -> Tuple[List[str], List[Tuple]]:
+        """Return (column_names, rows) for every watchlist member, for CSV export.
+
+        Same qrz columns as get_qrz_export_data (also dropping id), prefixed
+        with the owning watchlist's name and a Yes/No flag from
+        watchlistMembers.active. The grid column uses grid_override when set,
+        falling back to grid otherwise — same precedence as the map overlay.
+        """
+        excluded = QRZ_EXPORT_EXCLUDED_COLUMNS | {"id"}
+
+        def op(cursor, conn):
+            cursor.execute("SELECT * FROM qrz LIMIT 0")
+            qrz_columns = [d[0] for d in cursor.description]
+            kept_qrz_columns = [c for c in qrz_columns if c not in excluded]
+            select_cols = ", ".join(
+                "COALESCE(NULLIF(q.grid_override, ''), q.grid) AS grid" if c == "grid" else f"q.{c}"
+                for c in kept_qrz_columns
+            )
+            cursor.execute(
+                f"SELECT w.name, wm.active, {select_cols} "
+                "FROM watchlistMembers wm "
+                "JOIN watchlists w ON w.id = wm.watchlist_id "
+                "JOIN qrz q ON q.id = wm.member_id "
+                "ORDER BY w.name, q.callsign"
+            )
+            columns = ["Watchlist", "Active"] + kept_qrz_columns
+            rows = [
+                (row[0], "Yes" if row[1] else "No") + tuple(row[2:])
+                for row in cursor.fetchall()
+            ]
+            return columns, rows
+        return self._execute(op, ([], []))
+
+    def get_watchlist_callsigns_export_data(self) -> List[Tuple[str, List[str]]]:
+        """Return [(watchlist_name, [callsigns])] for every watchlist that has
+        members, for the Watchlist Callsigns bulk-import export."""
+        def op(cursor, conn):
+            cursor.execute(
+                "SELECT w.name, q.callsign "
+                "FROM watchlistMembers wm "
+                "JOIN watchlists w ON w.id = wm.watchlist_id "
+                "JOIN qrz q ON q.id = wm.member_id "
+                "ORDER BY w.name, q.callsign"
+            )
+            grouped: Dict[str, List[str]] = {}
+            order: List[str] = []
+            for name, callsign in cursor.fetchall():
+                if name not in grouped:
+                    grouped[name] = []
+                    order.append(name)
+                grouped[name].append(callsign)
+            return [(name, grouped[name]) for name in order]
         return self._execute(op, [])
 
     def delete_qrz_contact(self, callsign: str) -> bool:
@@ -3668,32 +3770,12 @@ class MainWindow(QtWidgets.QMainWindow):
             header.setFont(font)
             menu.addAction(header)
 
-        # WEATHER MAPS section - browser links
-        add_section_header(self.tools_menu, "Weather Maps")
-        for label, url in WEATHER_MAP_LINKS:
-            create_action(
-                self.tools_menu, label, "weather_" + label.lower().replace(" ", "_").replace(".", "_"),
-                lambda checked=False, u=url, lbl=label: self._open_external_link(u, lbl)
-            )
-
-        add_section_header(self.tools_menu, "Internet Websites")
-        create_action(
-            self.tools_menu, "Apocalypse Early Warning", "apocalypse_early_warning",
-            lambda checked=False: self._open_external_link("https://ews.kylemcdonald.net/", "Apocalypse Early Warning")
-        )
-        create_action(self.tools_menu, "Flock Camera Map", "flock_camera_map", self._on_flock_camera_map)
-        create_action(self.tools_menu, "Live Radiation Map", "live_radiation_map", self._on_live_radiation_map)
-        for label, key, url in [
-            ("Real-Time Lightning",    "lightning_map",     "https://www.lightningmaps.org/"),
-            ("US Power Outages",       "power_outages",     "https://poweroutage.us/"),
-            ("USGS Earthquakes",       "usgs_earthquakes",  "https://earthquake.usgs.gov/earthquakes/map/"),
-            ("Wildfire Map",           "wildfire_map",      "https://wildfiretrackers.com/"),
-            ("World Internet Outages", "internet_outages",  "https://radar.cloudflare.com/outage-center"),
-        ]:
-            create_action(
-                self.tools_menu, label, key,
-                lambda checked=False, u=url, lbl=label: self._open_external_link(u, lbl)
-            )
+        # Export section - dump database tables to CSV
+        add_section_header(self.tools_menu, "Export")
+        create_action(self.tools_menu, "Contacts", "export_contacts", self._on_export_contacts)
+        create_action(self.tools_menu, "Status Reports", "export_statreps", self._on_export_statreps)
+        create_action(self.tools_menu, "Watchlist Members", "export_watchlist_members", self._on_export_watchlist_members)
+        create_action(self.tools_menu, "Watchlist Callsigns", "export_watchlist_callsigns", self._on_export_watchlist_callsigns)
 
         # HAMSQL Tools section - solar/radio image dialogs
         add_section_header(self.tools_menu, "HAMSQL Tools")
@@ -3714,6 +3796,39 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Menubar items
         create_action(self.menubar, "QRZ", "qrz_lookup", self._on_qrz_lookup)
+
+        # Create Websites dropdown menu - browser links formerly under Tools
+        self.websites_menu = _MenuBarMenu("Websites", self.menubar)
+        self.menubar.addMenu(self.websites_menu)
+
+        add_section_header(self.websites_menu, "Weather Maps")
+        for label, url in WEATHER_MAP_LINKS:
+            create_action(
+                self.websites_menu, label, "weather_" + label.lower().replace(" ", "_").replace(".", "_"),
+                lambda checked=False, u=url, lbl=label: self._open_external_link(u, lbl)
+            )
+
+        add_section_header(self.websites_menu, "Internet Websites")
+        create_action(
+            self.websites_menu, "Apocalypse Early Warning", "apocalypse_early_warning",
+            lambda checked=False: self._open_external_link("https://ews.kylemcdonald.net/", "Apocalypse Early Warning")
+        )
+        create_action(self.websites_menu, "Flock Camera Map", "flock_camera_map", self._on_flock_camera_map)
+        create_action(self.websites_menu, "Live Radiation Map", "live_radiation_map", self._on_live_radiation_map)
+        for label, key, url in [
+            ("Real-Time Lightning",    "lightning_map",     "https://www.lightningmaps.org/"),
+            ("US Power Outages",       "power_outages",     "https://poweroutage.us/"),
+            ("USGS Earthquakes",       "usgs_earthquakes",  "https://earthquake.usgs.gov/earthquakes/map/"),
+            ("Wildfire Map",           "wildfire_map",      "https://wildfiretrackers.com/"),
+            ("World Internet Outages", "internet_outages",  "https://radar.cloudflare.com/outage-center"),
+        ]:
+            create_action(
+                self.websites_menu, label, key,
+                lambda checked=False, u=url, lbl=label: self._open_external_link(u, lbl)
+            )
+
+        self._fix_plain_menu_indent(self.websites_menu)
+
         create_action(self.menubar, "Help", "help", self._on_help)
         create_action(self.menubar, "Exit" + " " * 10, "exit", qApp.quit)
         create_action(self.menubar, "What's New" + " " * 10, "whats_new", self._on_whats_new)
@@ -7599,6 +7714,64 @@ window.commstatBouncePin = function(srid) {
             self._set_map_view_mode(getattr(self, "_last_map_region", "us"))
         else:
             self._set_map_view_mode("contacts")
+
+    def _export_csv(self, title: str, filename_prefix: str, data_fn) -> None:
+        """Prompt for a save path and write the (columns, rows) from data_fn to CSV."""
+        default_name = f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, title, default_name, "CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+
+        columns, rows = data_fn()
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                writer.writerows(rows)
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(self, "Export Failed", f"Could not write CSV file:\n{e}")
+            return
+
+        QtWidgets.QMessageBox.information(
+            self, "Export Complete", f"Exported {len(rows)} record(s) to:\n{file_path}"
+        )
+
+    def _on_export_contacts(self) -> None:
+        """Export all qrz table rows to a CSV file (Tools > Export menu)."""
+        self._export_csv("Export Contacts", "contacts", self.db.get_qrz_export_data)
+
+    def _on_export_statreps(self) -> None:
+        """Export all statrep table rows to a CSV file (Tools > Export menu)."""
+        self._export_csv("Export Status Reports", "status_reports", self.db.get_statrep_export_data)
+
+    def _on_export_watchlist_members(self) -> None:
+        """Export all watchlist members to a CSV file (Tools > Export menu)."""
+        self._export_csv("Export Watchlist Members", "watchlist_members", self.db.get_watchlist_members_export_data)
+
+    def _on_export_watchlist_callsigns(self) -> None:
+        """Export watchlist callsigns to a bulk-import TXT file (Tools > Export
+        menu). One line per watchlist: "Name: CALL1, CALL2, CALL3"."""
+        default_name = f"watchlist_callsigns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Watchlist Callsigns", default_name, "Text Files (*.txt)"
+        )
+        if not file_path:
+            return
+
+        data = self.db.get_watchlist_callsigns_export_data()
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                for name, callsigns in data:
+                    f.write(f"{name}: {', '.join(callsigns)}\n")
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(self, "Export Failed", f"Could not write file:\n{e}")
+            return
+
+        QtWidgets.QMessageBox.information(
+            self, "Export Complete", f"Exported {len(data)} watchlist(s) to:\n{file_path}"
+        )
 
     def _on_data_manager(self) -> None:
         """Open Data Manager dialog (Tools menu)."""
