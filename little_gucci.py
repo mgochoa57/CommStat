@@ -758,25 +758,31 @@ def _extract_youtube_id(url: str) -> Optional[str]:
 # clicks anywhere on the video and toggles play/pause. Prev/Next (bottom
 # corners) and YouTube (bottom
 # center) stay hidden until the mouse
-# is over the pane (body:hover) so they don't clutter the video. The
-# iframe is 190px taller than the page and shifted up 95px so YouTube's
-# edge-anchored chrome (paused-state share / "More videos" / "Watch on
-# YouTube" row at the bottom, title bar at the top) sits outside the
-# visible area; at the pane's 16:9 default size the crop only eats
-# letterbox.
+# is over the pane (body:hover) so they don't clutter the video.
+# The pane isn't always 16:9 (operator can resize/stretch the window), so
+# layoutVideoBox() computes a true 16:9 box that fits inside the pane
+# (letterboxed/pillarboxed with black bars, never cropped) and publishes it
+# as CSS vars (--vb-*); it reruns on window resize. #player and #poster are
+# sized off those vars instead of the pane's raw 100%/100vw so the full
+# video frame is always visible. The iframe box is additionally 190px taller
+# than the 16:9 box and shifted up 95px within it so YouTube's edge-anchored
+# chrome (paused-state share / "More videos" / "Watch on YouTube" row at the
+# bottom, title bar at the top) sits outside the visible 16:9 area.
 _VIDEO_PLAYER_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
 html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}
-#player{position:absolute;top:-95px;left:0;width:100%;height:calc(100% + 190px);border:0;}
+:root{--vb-w:100vw;--vb-h:100vh;--vb-l:0px;--vb-t:0px;}
+#player{position:absolute;top:calc(var(--vb-t) - 95px);left:var(--vb-l);
+width:var(--vb-w);height:calc(var(--vb-h) + 190px);border:0;}
 /* #poster is a separate element (not #player itself, which the iframe_api
    script replaces with the real iframe) so YouTube's static thumbnail (no
    API key needed) stays visible above the iframe's own black paused frame
    (controls:0 suppresses YouTube's native thumbnail) until playback
-   actually starts. Sized to the real visible pane (not #player's oversized/
-   shifted box, which exists only to crop YouTube's iframe chrome off the
-   video) since hqdefault.jpg is already 16:9 and needs no cropping. */
-#poster{position:absolute;top:0;left:0;width:100%;height:100%;
+   actually starts. Sized to the real visible 16:9 box (not #player's
+   oversized/shifted box, which exists only to crop YouTube's iframe chrome
+   off the video) since hqdefault.jpg is already 16:9 and needs no cropping. */
+#poster{position:absolute;top:var(--vb-t);left:var(--vb-l);width:var(--vb-w);height:var(--vb-h);
 background-image:url('https://img.youtube.com/vi/__VIDEO_ID__/hqdefault.jpg');
 background-size:cover;background-position:center;background-color:#000;
 z-index:3;pointer-events:none;}
@@ -806,6 +812,18 @@ body:hover #prev,body:hover #next,body:hover #bottomCenter{opacity:1;pointer-eve
 <button id="youtube" onclick="window.location='commstat://video-youtube/__VIDEO_ID__';">YouTube</button>
 </div>
 <script>
+function layoutVideoBox() {
+    var w = window.innerWidth, h = window.innerHeight, aspect = 16 / 9;
+    var boxW = w, boxH = Math.round(w / aspect);
+    if (boxH > h) { boxH = h; boxW = Math.round(h * aspect); }
+    var root = document.documentElement.style;
+    root.setProperty('--vb-w', boxW + 'px');
+    root.setProperty('--vb-h', boxH + 'px');
+    root.setProperty('--vb-l', Math.round((w - boxW) / 2) + 'px');
+    root.setProperty('--vb-t', Math.round((h - boxH) / 2) + 'px');
+}
+layoutVideoBox();
+window.addEventListener('resize', layoutVideoBox);
 var tag = document.createElement('script');
 tag.src = "https://www.youtube.com/iframe_api";
 document.head.appendChild(tag);
@@ -2379,14 +2397,14 @@ class DatabaseManager:
     def get_map_filters(self) -> List[Tuple[str, str, str, str, str, str]]:
         """All saved Custom Filtering criteria sets, ordered by name.
 
-        Returns (name, from_call, to_call, sr_id, grid, mode) tuples. The
+        Returns (name, from_call, to_call, grid, remarks, mode) tuples. The
         OperationalError guard keeps the filter bar usable on a database that
         predates the map_filters table - same approach as get_default_map.
         """
         def op(cursor, conn):
             try:
                 cursor.execute(
-                    "SELECT name, from_call, to_call, sr_id, grid, mode "
+                    "SELECT name, from_call, to_call, grid, remarks, mode "
                     "FROM map_filters ORDER BY name COLLATE NOCASE"
                 )
                 return [
@@ -2398,21 +2416,21 @@ class DatabaseManager:
         return self._execute(op, [])
 
     def save_map_filter(self, name: str, from_call: str, to_call: str,
-                        sr_id: str, grid: str, mode: str) -> bool:
+                        grid: str, remarks: str, mode: str) -> bool:
         """Insert or replace a saved Custom Filtering criteria set by name."""
         def op(cursor, conn):
             try:
                 cursor.execute(
-                    "UPDATE map_filters SET from_call = ?, to_call = ?, sr_id = ?,"
-                    " grid = ?, mode = ? WHERE name = ?",
-                    (from_call, to_call, sr_id, grid, mode, name)
+                    "UPDATE map_filters SET from_call = ?, to_call = ?,"
+                    " grid = ?, remarks = ?, mode = ? WHERE name = ?",
+                    (from_call, to_call, grid, remarks, mode, name)
                 )
                 if cursor.rowcount == 0:
                     cursor.execute(
                         "INSERT INTO map_filters"
-                        " (name, from_call, to_call, sr_id, grid, mode, date_added)"
+                        " (name, from_call, to_call, grid, remarks, mode, date_added)"
                         " VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-                        (name, from_call, to_call, sr_id, grid, mode)
+                        (name, from_call, to_call, grid, remarks, mode)
                     )
                 conn.commit()
                 return True
@@ -4039,7 +4057,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Boxes are wide (140px) because each holds a comma- or space-
         # separated list; longer lists scroll horizontally within the box.
         # No tooltips here - the rules are documented in the map's Filter > Help.
-        _FIELDS = [("from", "From"), ("to", "To"), ("id", "ID"), ("grid", "Grid")]
+        _FIELDS = [("from", "From"), ("to", "To"), ("grid", "Grid"), ("remarks", "Remarks")]
         self._cf_inputs: Dict[str, QtWidgets.QLineEdit] = {}
         self._cf_conj_labels: List[QtWidgets.QLabel] = []
         for idx, (key, label_text) in enumerate(_FIELDS):
@@ -4050,7 +4068,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._cf_conj_labels.append(conj)
                 row.addWidget(conj)
 
-            edit = UpperCaseLineEdit()
+            # Remarks is free text (not a callsign/grid), so it keeps whatever
+            # case the operator typed; matching itself is already
+            # case-insensitive (see _custom_filter_match).
+            edit = QtWidgets.QLineEdit() if key == "remarks" else UpperCaseLineEdit()
             edit.setFixedSize(140, 22)
             edit.setPlaceholderText(label_text)
             edit.textChanged.connect(lambda _t: self._custom_filter_timer.start())
@@ -4070,6 +4091,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         row.addWidget(self._cf_mode_combo)
 
+        # Clear empties the four criteria boxes without touching any saved
+        # filter, so it sits before Save/Delete rather than with them.
+        self._cf_clear_btn = QtWidgets.QPushButton("Clear")
+        row.addWidget(self._cf_clear_btn)
+
         # Save / Delete act on the saved-filter dropdown, so they sit with the
         # criteria rather than with the bar's Help / Close chrome.
         self._cf_save_btn = QtWidgets.QPushButton("Save")
@@ -4087,6 +4113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self._cf_close_btn)
 
         self._cf_action_buttons = [
+            (self._cf_clear_btn, COLOR_BTN_RED),
             (self._cf_save_btn, COLOR_BTN_GREEN),
             (self._cf_delete_btn, COLOR_BTN_RED),
             (self._cf_help_btn, "#e83e8c"),
@@ -4094,6 +4121,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         # connect_single: a second click while the name prompt is up would
         # otherwise stack two dialogs.
+        self._cf_clear_btn.clicked.connect(self._on_clear_custom_filter)
         connect_single(self._cf_save_btn, self._on_save_custom_filter)
         connect_single(self._cf_delete_btn, self._on_delete_custom_filter)
         self._cf_help_btn.clicked.connect(lambda _c: self._on_map_filter_help())
@@ -4223,17 +4251,28 @@ class MainWindow(QtWidgets.QMainWindow):
         saved = self._cf_saved.get(name)
         if not saved:
             return
-        from_call, to_call, sr_id, grid, mode = saved
+        from_call, to_call, grid, remarks, mode = saved
         # Signals blocked: four textChanged firings would each restart the
         # debounce timer, and the single _apply_custom_filter below covers all.
         for key, value in (("from", from_call), ("to", to_call),
-                           ("id", sr_id), ("grid", grid)):
+                           ("grid", grid), ("remarks", remarks)):
             edit = self._cf_inputs[key]
             edit.blockSignals(True)
             edit.setText(value or "")
             edit.blockSignals(False)
         self._custom_filter_mode = mode if mode in ("and", "or") else "or"
         self._refresh_custom_filter_mode_ui()
+        self._apply_custom_filter()
+
+    def _on_clear_custom_filter(self) -> None:
+        """Empty all four criteria boxes and re-filter once.
+
+        Leaves the saved-filter dropdown and AND/OR mode alone - this only
+        clears what is typed, not any saved filter."""
+        for edit in self._cf_inputs.values():
+            edit.blockSignals(True)
+            edit.clear()
+            edit.blockSignals(False)
         self._apply_custom_filter()
 
     def _on_save_custom_filter(self) -> None:
@@ -4261,7 +4300,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
         if not self.db.save_map_filter(
-            name, values["from"], values["to"], values["id"], values["grid"],
+            name, values["from"], values["to"], values["grid"], values["remarks"],
             self._custom_filter_mode
         ):
             QtWidgets.QMessageBox.critical(
@@ -4301,10 +4340,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._map_filter_state != "custom":
             return True
         pairs = [
-            (self._cf_inputs["from"].text(), row[3]),
-            (self._cf_inputs["to"].text(),   row[4]),
-            (self._cf_inputs["id"].text(),   row[5]),
-            (self._cf_inputs["grid"].text(), row[6]),
+            (self._cf_inputs["from"].text(),    row[3]),
+            (self._cf_inputs["to"].text(),      row[4]),
+            (self._cf_inputs["grid"].text(),    row[6]),
+            (self._cf_inputs["remarks"].text(), row[20]),
         ]
         results = []
         for raw, field in pairs:
@@ -8497,6 +8536,13 @@ window.commstatBouncePin = function(srid) {
             table.viewport().setCursor(Qt.ArrowCursor)
         table.setRowCount(0)
 
+        # Bulk-populate with repaints suppressed - without this, a jump from a
+        # small filtered set (e.g. Custom Filtering narrowed to a few rows) to
+        # a large one (e.g. switching Map Filter back to Off/every group) can
+        # visibly freeze the UI while thousands of QTableWidgetItems are laid
+        # out one at a time. Same fix already used for contacts_table's load.
+        table.setUpdatesEnabled(False)
+
         # Pre-fetch QRZ callsigns and user callsign for bold highlighting
         qrz_callsigns = self.db.get_qrz_callsigns()
         user_callsign, _, __ = self.db.get_user_settings()
@@ -8640,6 +8686,8 @@ window.commstatBouncePin = function(srid) {
         # Alert table (non-statrep, non-message): sort by first column descending
         if not is_message_table and not is_statrep_table:
             table.sortItems(0, QtCore.Qt.DescendingOrder)
+
+        table.setUpdatesEnabled(True)
 
         # One-time content-based fit for the Interactive middle columns (col 0
         # is Fixed, the last column is Stretch — both skipped here). Only runs
