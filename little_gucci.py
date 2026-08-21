@@ -7718,8 +7718,10 @@ window.commstatBouncePin = function(srid) {
     def _export_csv(self, title: str, filename_prefix: str, data_fn) -> None:
         """Prompt for a save path and write the (columns, rows) from data_fn to CSV."""
         default_name = f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        downloads_dir = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DownloadLocation)
+        default_path = os.path.join(downloads_dir, default_name) if downloads_dir else default_name
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, title, default_name, "CSV Files (*.csv)"
+            self, title, default_path, "CSV Files (*.csv)"
         )
         if not file_path:
             return
@@ -7754,8 +7756,10 @@ window.commstatBouncePin = function(srid) {
         """Export watchlist callsigns to a bulk-import TXT file (Tools > Export
         menu). One line per watchlist: "Name: CALL1, CALL2, CALL3"."""
         default_name = f"watchlist_callsigns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        downloads_dir = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DownloadLocation)
+        default_path = os.path.join(downloads_dir, default_name) if downloads_dir else default_name
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export Watchlist Callsigns", default_name, "Text Files (*.txt)"
+            self, "Export Watchlist Callsigns", default_path, "Text Files (*.txt)"
         )
         if not file_path:
             return
