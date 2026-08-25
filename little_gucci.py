@@ -1058,7 +1058,7 @@ class ConfigManager:
 
         if not self.config_path.exists():
             self.directed_config = {
-                'hide_heartbeat': False, 'show_all_groups': True, 'show_every_group': True,
+                'hide_heartbeat': False, 'show_every_group': True,
                 'hide_map': False, 'show_alerts': False, 'show_contacts': False,
                 'hide_internet_feed': False,
                 'save_all_alerts': False, 'save_all_messages': False, 'save_all_videos': False,
@@ -1078,8 +1078,6 @@ class ConfigManager:
                 'wildfire_min_acres': 10.0,
                 'wildfire_refresh': 30,
                 'shown_watchlists': '',
-                'font_family': 'Segoe UI',
-                'font_size': 9,
             }
             return
 
@@ -1094,7 +1092,6 @@ class ConfigManager:
         if config.has_section("DIRECTEDCONFIG"):
             self.directed_config = {
                 'hide_heartbeat': config.getboolean("DIRECTEDCONFIG", "hide_heartbeat", fallback=False),
-                'show_all_groups': config.getboolean("DIRECTEDCONFIG", "show_all_groups", fallback=False),
                 'show_every_group': config.getboolean("DIRECTEDCONFIG", "show_every_group", fallback=False),
                 'hide_map': config.getboolean("DIRECTEDCONFIG", "hide_map", fallback=False),
                 'show_alerts': config.getboolean("DIRECTEDCONFIG", "show_alerts", fallback=False),
@@ -1127,7 +1124,7 @@ class ConfigManager:
             }
         else:
             self.directed_config = {
-                'hide_heartbeat': False, 'show_all_groups': True, 'show_every_group': True,
+                'hide_heartbeat': False, 'show_every_group': True,
                 'hide_map': False, 'show_alerts': False, 'show_contacts': False,
                 'hide_internet_feed': False,
                 'save_all_alerts': False, 'save_all_messages': False, 'save_all_videos': False,
@@ -1313,18 +1310,6 @@ class ConfigManager:
 
     def set_map_theme(self, value: str) -> None:
         self._save_setting('map_theme', value)
-
-    def get_font_family(self) -> str:
-        return self.directed_config.get('font_family', 'Segoe UI')
-
-    def set_font_family(self, value: str) -> None:
-        self._save_setting('font_family', value)
-
-    def get_font_size(self) -> int:
-        return int(self.directed_config.get('font_size', 9))
-
-    def set_font_size(self, value: int) -> None:
-        self._save_setting('font_size', value)
 
     def get_earthquake_layer(self) -> bool:
         return bool(self.directed_config.get('earthquake_layer', False))
@@ -1654,7 +1639,7 @@ class DatabaseManager:
                         query = f"""
                             SELECT db, datetime, freq, from_callsign, target, sr_id, grid, scope, map,
                                    power, water, med, telecom, travel, internet,
-                                   fuel, food, crime, civil, political, comments, source, id
+                                   fuel, food, crime, civil, political, comments, source, id, global_id
                             FROM statrep
                             WHERE target NOT IN ({placeholders})
                               AND ({date_condition} OR pinned = 1)
@@ -1665,7 +1650,7 @@ class DatabaseManager:
                         query = f"""
                             SELECT db, datetime, freq, from_callsign, target, sr_id, grid, scope, map,
                                    power, water, med, telecom, travel, internet,
-                                   fuel, food, crime, civil, political, comments, source, id
+                                   fuel, food, crime, civil, political, comments, source, id, global_id
                             FROM statrep
                             WHERE {date_condition} OR pinned = 1
                             ORDER BY datetime DESC
@@ -1683,7 +1668,7 @@ class DatabaseManager:
                     query = f"""
                         SELECT db, datetime, freq, from_callsign, target, sr_id, grid, scope, map,
                                power, water, med, telecom, travel, internet,
-                               fuel, food, crime, civil, political, comments, source, id
+                               fuel, food, crime, civil, political, comments, source, id, global_id
                         FROM statrep
                         WHERE target IN ({placeholders}) AND ({date_condition} OR pinned = 1)
                         ORDER BY datetime DESC
@@ -1695,22 +1680,6 @@ class DatabaseManager:
         except sqlite3.Error as error:
             print(f"Database error: {error}")
             return []
-
-    def get_event_pinned_map(self) -> Dict[int, int]:
-        """Return {statrep.id: pinned} for every Event row (map == '6').
-
-        Used only by the map's Event-marker branch, kept separate from
-        get_statrep_data() so its SELECT/tuple shape (consumed positionally
-        by _populate_table against a fixed header list) never changes.
-        """
-        try:
-            with sqlite3.connect(self.db_path, timeout=10) as connection:
-                cursor = connection.cursor()
-                cursor.execute("SELECT id, pinned FROM statrep WHERE map = '6'")
-                return {row[0]: row[1] for row in cursor.fetchall()}
-        except sqlite3.Error as error:
-            print(f"Database error: {error}")
-            return {}
 
     def get_message_data(
         self,
@@ -1745,7 +1714,7 @@ class DatabaseManager:
 
                 if show_all:
                     # Show all messages regardless of group
-                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source, delivered
+                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source, delivered, global_id
                                FROM messages
                                WHERE {date_condition}
                                ORDER BY datetime DESC"""
@@ -1754,7 +1723,7 @@ class DatabaseManager:
                     # Filter by active groups (add @ prefix for matching)
                     groups_with_at = ["@" + g for g in groups]
                     placeholders = ",".join("?" * len(groups_with_at))
-                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source, delivered
+                    query = f"""SELECT db, datetime, freq, from_callsign, target, msg_id, message, source, delivered, global_id
                                FROM messages
                                WHERE target IN ({placeholders}) AND {date_condition}
                                ORDER BY datetime DESC"""
@@ -2145,13 +2114,30 @@ class DatabaseManager:
             return {row[0]: row[1] for row in cursor.fetchall()}
         return self._execute(op, {})
 
+    def get_watchlist_active_member_counts(self) -> Dict[str, int]:
+        """Get active-member counts keyed by watchlist name. Active reflects
+        the qrz contact's own flag (qrz.active), shared across every
+        watchlist a contact belongs to. Empty or fully-inactive watchlists
+        count 0."""
+        def op(cursor, conn):
+            cursor.execute(
+                "SELECT w.name, COUNT(q.id) FROM watchlists w "
+                "LEFT JOIN watchlistMembers wm ON wm.watchlist_id = w.id "
+                "LEFT JOIN qrz q ON q.id = wm.member_id AND q.active = 1 "
+                "GROUP BY w.id"
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        return self._execute(op, {})
+
     def get_watchlist_members(self, watchlist_id: int) -> List[Dict]:
         """Get a watchlist's members joined with their qrz contact details.
-        The grid column shows the operator's grid_override when one is set."""
+        The grid column shows the operator's grid_override when one is set.
+        Active is the qrz contact's own flag (qrz.active) — shared across
+        every watchlist the contact belongs to, not per-membership."""
         def op(cursor, conn):
             cursor.execute(
                 "SELECT q.id, q.callsign, q.name, q.city, q.state, "
-                "COALESCE(NULLIF(q.grid_override, ''), q.grid), wm.active "
+                "COALESCE(NULLIF(q.grid_override, ''), q.grid), q.active "
                 "FROM watchlistMembers wm JOIN qrz q ON q.id = wm.member_id "
                 "WHERE wm.watchlist_id = ? ORDER BY q.callsign",
                 (watchlist_id,)
@@ -2199,13 +2185,16 @@ class DatabaseManager:
             return cursor.rowcount > 0
         return self._execute(op, False)
 
-    def set_watchlist_member_active(self, watchlist_id: int, member_id: int, active: bool) -> bool:
-        """Set a watchlist member's Active flag — controls whether they show
-        on the map when their watchlist is checked under Watchlist Overlay."""
+    def set_watchlist_member_active(self, member_id: int, active: bool) -> bool:
+        """Set a qrz contact's Active flag — controls whether they show on the
+        map when any watchlist they belong to is checked under Watchlist
+        Overlay. Lives on the qrz row (member_id == qrz.id), not per
+        watchlist membership, so it's shared across every watchlist the
+        contact is on."""
         def op(cursor, conn):
             cursor.execute(
-                "UPDATE watchlistMembers SET active = ? WHERE watchlist_id = ? AND member_id = ?",
-                (1 if active else 0, watchlist_id, member_id)
+                "UPDATE qrz SET active = ? WHERE id = ?",
+                (1 if active else 0, member_id)
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -2245,7 +2234,7 @@ class DatabaseManager:
         def op(cursor, conn):
             try:
                 cursor.execute(
-                    "INSERT INTO qrz (callsign, name, city, state, grid) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO qrz (callsign, active, name, city, state, grid) VALUES (?, 1, ?, ?, ?, ?)",
                     (cs, name.strip().title(), city.strip().title(),
                      state.strip().upper(), grid.strip())
                 )
@@ -2262,7 +2251,8 @@ class DatabaseManager:
         for the active members of the named watchlists. A callsign on two shown
         watchlists with different object styles returns one row per style. The
         joins drop members whose watchlist or qrz contact was deleted, and
-        inactive members (wm.active = 0) are excluded from the overlay."""
+        inactive contacts (q.active = 0, a per-contact flag shared across every
+        watchlist they belong to) are excluded from the overlay."""
         if not watchlist_names:
             return []
         def op(cursor, conn):
@@ -2273,7 +2263,7 @@ class DatabaseManager:
                 "FROM watchlistMembers wm "
                 "JOIN qrz q ON q.id = wm.member_id "
                 f"JOIN watchlists w ON w.id = wm.watchlist_id AND w.name IN ({placeholders}) "
-                "WHERE wm.active = 1",
+                "WHERE q.active = 1",
                 watchlist_names
             )
             return cursor.fetchall()
@@ -2357,7 +2347,8 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT callsign, name, address, city, state, zip, country, grid, "
-                "class, email, image, memo, insert_date FROM qrz ORDER BY insert_date DESC"
+                "class, email, image, memo, insert_date FROM qrz WHERE type = 1 "
+                "ORDER BY insert_date DESC"
             )
             return cursor.fetchall()
         return self._execute(op, [])
@@ -2380,7 +2371,7 @@ class DatabaseManager:
         Excludes QRZ_EXPORT_EXCLUDED_COLUMNS.
         """
         def op(cursor, conn):
-            cursor.execute("SELECT * FROM qrz")
+            cursor.execute("SELECT * FROM qrz WHERE type = 1")
             columns = [d[0] for d in cursor.description]
             keep_indices = [i for i, c in enumerate(columns) if c not in QRZ_EXPORT_EXCLUDED_COLUMNS]
             kept_columns = [columns[i] for i in keep_indices]
@@ -2392,9 +2383,10 @@ class DatabaseManager:
         """Return (column_names, rows) for every watchlist member, for CSV export.
 
         Same qrz columns as get_qrz_export_data (also dropping id), prefixed
-        with the owning watchlist's name and a Yes/No flag from
-        watchlistMembers.active. The grid column uses grid_override when set,
-        falling back to grid otherwise — same precedence as the map overlay.
+        with the owning watchlist's name and a Yes/No flag from qrz.active
+        (per-contact, shared across every watchlist). The grid column uses
+        grid_override when set, falling back to grid otherwise — same
+        precedence as the map overlay.
         """
         excluded = QRZ_EXPORT_EXCLUDED_COLUMNS | {"id"}
 
@@ -2407,7 +2399,7 @@ class DatabaseManager:
                 for c in kept_qrz_columns
             )
             cursor.execute(
-                f"SELECT w.name, wm.active, {select_cols} "
+                f"SELECT w.name, q.active, {select_cols} "
                 "FROM watchlistMembers wm "
                 "JOIN watchlists w ON w.id = wm.watchlist_id "
                 "JOIN qrz q ON q.id = wm.member_id "
@@ -5537,7 +5529,7 @@ class MainWindow(QtWidgets.QMainWindow):
             with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
                 conn.execute(query, tuple(data.values()))
                 conn.commit()
-            print(f"{ConsoleColors.SUCCESS}[{rig_name}] Added {msg_type.upper()} {data.get(id_field, '')}{extra_info} from: {from_callsign}{ConsoleColors.RESET}")
+            print(f"{ConsoleColors.SUCCESS}[{rig_name}] Added {msg_type.upper()} {data.get(id_field, '')}{extra_info} from: {from_callsign} (Global ID: {data.get('global_id', 0)}){ConsoleColors.RESET}")
             QtCore.QMetaObject.invokeMethod(
                 self, "_queue_notification_sound",
                 QtCore.Qt.QueuedConnection,
@@ -6990,10 +6982,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 user_callsign=_map_callsign
             )
 
-            # Pin-to-Map preference for Event rows, looked up separately so
-            # get_statrep_data()'s SELECT/tuple shape stays untouched.
-            event_pinned = self.db.get_event_pinned_map() if any(str(row[8]) == "6" for row in data) else {}
-
             gridlist = []
             for row in data:
                 callsign = row[3]   # from_callsign
@@ -7104,11 +7092,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     if status == "6":
                         # Event record: distinct outlined/translucent marker, no halo.
-                        # Pin to Map = No suppresses the marker but the row still
-                        # tracks in pin_registry for pan/bounce from the table.
-                        if event_pinned.get(statrep_id, 1) == 0:
-                            pin_registry[str(statrep_id)] = [lat, lon]
-                            continue
+                        # Renders whenever the row reached this loop at all — the
+                        # SQL query already applied the date-range/pinned filter,
+                        # same as every other status. Pinned just keeps it on the
+                        # map past its date range, exactly like non-Event pins.
                         folium.Marker(
                             location=[lat, lon],
                             icon=self._event_pin_icon(self.config.get_color('condition_purple')),
@@ -7670,7 +7657,7 @@ window.commstatBouncePin = function(srid) {
             if callsign_item:
                 callsign = callsign_item.text().strip()
                 message_text = (message_item.data(QtCore.Qt.UserRole) or message_item.text()) if message_item else ""
-                msg_id = msg_id_item.text().strip() if msg_id_item else ""
+                msg_id = str(msg_id_item.data(QtCore.Qt.UserRole)).strip() if msg_id_item and msg_id_item.data(QtCore.Qt.UserRole) is not None else ""
                 from qrz_lookup import MessageDetailDialog
                 dlg = MessageDetailDialog(
                     callsign, message_text, self._internet_available,
@@ -7695,13 +7682,13 @@ window.commstatBouncePin = function(srid) {
 
     def _on_qrz_record_written(self, callsign: str) -> None:
         """Bold any matching From-callsign (col 3) cells in StatRep and Message tables."""
-        cs = callsign.strip().upper()
+        cs = base_callsign(callsign)
         if not cs:
             return
         for table in (self.statrep_table, self.message_table):
             for row in range(table.rowCount()):
                 item = table.item(row, 3)
-                if item and item.text().strip().upper() == cs:
+                if item and base_callsign(item.text()) == cs:
                     font = item.font()
                     if not font.bold():
                         font.setBold(True)
@@ -8800,6 +8787,21 @@ window.commstatBouncePin = function(srid) {
                     except (ValueError, TypeError):
                         pass
 
+                # ID column (col 5) shows the server-assigned global_id, falling
+                # back to sr_id when no global_id has been assigned (0/None) —
+                # the map pin/bounce click still keys off the row's internal db
+                # id (row_data[22]), set as UserRole data below.
+                if is_statrep_table and col_num == 5 and len(row_data) > 23:
+                    global_id_value = row_data[23]
+                    display_value = str(global_id_value) if global_id_value else display_value
+
+                # Message ID column (col 5) shows the server-assigned global_id,
+                # falling back to msg_id when no global_id has been assigned (0/None).
+                if is_message_table and col_num == 5 and len(row_data) > 9:
+                    global_id_value = row_data[9]
+                    display_value = str(global_id_value) if global_id_value else display_value
+
+
                 item = QTableWidgetItem(display_value)
 
                 # Use Kode Mono for remarks/message text columns
@@ -8816,7 +8818,7 @@ window.commstatBouncePin = function(srid) {
 
                 # Bold From callsign (col 3) if callsign is in QRZ cache
                 if col_num == 3:
-                    from_call = display_value.upper()
+                    from_call = base_callsign(display_value)
                     if from_call in qrz_callsigns:
                         font = item.font()
                         font.setBold(True)
@@ -8824,8 +8826,8 @@ window.commstatBouncePin = function(srid) {
                         item.setToolTip("Exists in QRZ local cache")
                 # Bold To callsign (col 4) only when it matches the user's callsign
                 elif col_num == 4:
-                    to_call = display_value.upper()
-                    if is_message_table and user_callsign and to_call == user_callsign:
+                    to_call = base_callsign(display_value)
+                    if is_message_table and user_callsign and to_call == base_callsign(user_callsign):
                         font = item.font()
                         font.setBold(True)
                         item.setFont(font)
@@ -8859,6 +8861,14 @@ window.commstatBouncePin = function(srid) {
                 id_item = table.item(row_num, 5)
                 if id_item:
                     id_item.setData(QtCore.Qt.UserRole, row_data[22])
+
+            # The message ID cell (col 5) may now display global_id instead of
+            # msg_id; stash the real msg_id so lookups/deletes keyed on it
+            # (MessageDetailDialog) still work regardless of what's shown.
+            if is_message_table and len(row_data) > 5:
+                msg_id_item = table.item(row_num, 5)
+                if msg_id_item:
+                    msg_id_item.setData(QtCore.Qt.UserRole, row_data[5])
 
         # Alert table (non-statrep, non-message): sort by first column descending
         if not is_message_table and not is_statrep_table:
@@ -9806,7 +9816,8 @@ window.commstatBouncePin = function(srid) {
         freq: int,
         snr: int,
         utc: str,
-        source: int
+        source: int,
+        global_id: int = 0
     ) -> tuple:
         """
         Parse MESSAGE format.
@@ -9823,6 +9834,7 @@ window.commstatBouncePin = function(srid) {
             snr: Signal-to-noise ratio in dB
             utc: UTC timestamp string "YYYY-MM-DD HH:MM:SS"
             source: 1=Radio (TCP), 2=Internet (commsrvr)
+            global_id: Server-assigned message ID from commsrvr (0 for Radio/unknown)
 
         Returns:
             (message_type, None) where message_type is "message" or ""
@@ -9920,7 +9932,8 @@ window.commstatBouncePin = function(srid) {
             'msg_id': msg_id,
             'from_callsign': from_callsign,
             'target': msg_target,
-            'message': message_text
+            'message': message_text,
+            'global_id': global_id
         }
 
         result = self._insert_message_data(
@@ -10192,7 +10205,7 @@ window.commstatBouncePin = function(srid) {
 
         # PRIORITY 7: MESSAGE
         result = self._parse_message(
-            rig_name, message_value, from_callsign, target, freq, snr, utc, source
+            rig_name, message_value, from_callsign, target, freq, snr, utc, source, global_id
         )
         if result[0]:
             return result
@@ -10434,27 +10447,6 @@ window.commstatBouncePin = function(srid) {
 # =============================================================================
 # Application Entry Point
 # =============================================================================
-
-
-    def _apply_user_font(self) -> None:
-        """Apply configured application font without changing pane/window geometry."""
-        try:
-            family = self.config.get_font_family() if hasattr(self.config, "get_font_family") else "Segoe UI"
-            size = self.config.get_font_size() if hasattr(self.config, "get_font_size") else 9
-            font = QtGui.QFont(family, size)
-            qApp.setFont(font)
-            self.setFont(font)
-            for widget in self.findChildren(QtWidgets.QWidget):
-                try:
-                    widget.setFont(font)
-                except Exception:
-                    pass
-            if hasattr(self, 'newsfeed_label'):
-                _ticker_font = QtGui.QFont("Kode Mono", -1)
-                _ticker_font.setPixelSize(15)
-                self.newsfeed_label.setFont(_ticker_font)
-        except Exception as e:
-            print(f"[Theme] Font apply failed: {e}")
 
 def main() -> None:
     """Application entry point."""
