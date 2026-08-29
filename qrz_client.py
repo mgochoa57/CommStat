@@ -86,7 +86,10 @@ def get_qrz_cached(callsign: str, include_stale: bool = False) -> Optional[Dict]
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cs = max(callsign.upper().split('/'), key=len) if '/' in callsign else callsign.upper()
-            cursor.execute("SELECT * FROM qrz WHERE callsign = ?", (cs,))
+            # COLLATE NOCASE: preset facility rows (nuclear plants, dams) aren't
+            # stored uppercase like real callsigns are, so a case-sensitive
+            # match would silently miss them.
+            cursor.execute("SELECT * FROM qrz WHERE callsign = ? COLLATE NOCASE", (cs,))
             row = cursor.fetchone()
             if row:
                 cached_date = datetime.fromisoformat(row["insert_date"])
@@ -174,16 +177,6 @@ class QRZClient:
         Args:
             data: Callsign data dict from QRZ XML API
         """
-        # Compute active flag from expiration date
-        expdate_str = data.get("expdate")
-        if expdate_str:
-            try:
-                active = 1 if expdate_str >= datetime.now(timezone.utc).strftime("%Y-%m-%d") else 0
-            except Exception:
-                active = None
-        else:
-            active = None
-
         # Combine fname + name into a single full name, apply normalization
         fname     = (data.get("fname")   or "").strip()
         name      = (data.get("name")    or "").strip()
@@ -195,7 +188,7 @@ class QRZClient:
 
         callsign = data.get("call", "").upper()
         values = (
-            active, full_name, address, city, county,
+            full_name, address, city, county,
             data.get("state"), data.get("zip"), data.get("country"),
             data.get("ccode"), data.get("lat"), data.get("lon"),
             data.get("grid"), data.get("fips"),
@@ -210,10 +203,12 @@ class QRZClient:
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 cursor = conn.cursor()
-                # Update existing row (preserves memo column)
+                # Update existing row (preserves memo and active columns —
+                # active is the operator-controlled watchlist show/hide flag,
+                # not derived from license expiration)
                 cursor.execute("""
                     UPDATE qrz SET
-                        active=?, name=?, address=?, city=?, county=?,
+                        name=?, address=?, city=?, county=?,
                         state=?, zip=?, country=?, ccode=?, lat=?, lon=?,
                         grid=?, fips=?, effdate=?, expdate=?,
                         class=?, email=?, image=?, areacode=?,
@@ -221,14 +216,17 @@ class QRZClient:
                     WHERE callsign = ?
                 """, values + (callsign,))
                 if cursor.rowcount == 0:
-                    # New callsign — insert fresh row
+                    # New callsign — insert fresh row. active has no column
+                    # DEFAULT, so it's set explicitly here (1 = shown on the
+                    # map/watchlists by default); the UPDATE path above never
+                    # touches it once set.
                     cursor.execute("""
                         INSERT INTO qrz (
                             callsign, active, name, address, city, county, state, zip,
                             country, ccode, lat, lon, grid, fips, effdate, expdate,
                             class, email, image, areacode, timezone, born, moddate, insert_date
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (callsign,) + values)
+                    """, (callsign, 1) + values)
                 conn.commit()
         except sqlite3.Error:
             pass

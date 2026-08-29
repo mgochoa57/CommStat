@@ -102,6 +102,10 @@ import netguard
 _COMMSRVR = base64.b64decode("aHR0cHM6Ly9jb21tc3RhdC5hcHA=").decode()
 _PING = _COMMSRVR + "/heartbeat-808585.php"
 
+# Default hyperlink blue - used to style the StatRep table's clickable
+# From/ID columns like links (color + underline, always on, not just hover).
+_LINK_COLOR = "#0000CC"
+
 # Backoff interval after repeated commsrvr heartbeat failures.
 HEARTBEAT_BACKOFF_MS = 30 * 60 * 1000  # 30 minutes
 
@@ -757,10 +761,11 @@ def _extract_youtube_id(url: str) -> Optional[str]:
 # Video player page loaded into the map QWebEngineView. Uses the YouTube
 # IFrame Player API; end-of-video navigates to commstat://video-ended (map
 # buttons are the way back to the map, so there's no on-screen exit control),
-# Prev/Next navigate to commstat://video-prev / commstat://video-next, and
+# Prev/Next navigate to commstat://video-prev / commstat://video-next,
 # YouTube navigates to commstat://video-youtube/{video_id} (opens the video
-# in the system browser). CustomWebEnginePage routes these to
-# _on_video_ended / _on_video_prev / _on_video_next / opening the browser.
+# in the system browser), and Delete navigates to commstat://video-delete.
+# CustomWebEnginePage routes these to _on_video_ended / _on_video_prev /
+# _on_video_next / opening the browser / _on_video_delete.
 # No autoplay: a transparent overlay (#tap) captures
 # clicks anywhere on the video and toggles play/pause. Prev/Next (bottom
 # corners) and YouTube (bottom
@@ -807,6 +812,10 @@ display:flex;opacity:0;pointer-events:none;transition:opacity .15s ease;}
 border-radius:4px;padding:4px 12px;font-family:sans-serif;font-size:13px;cursor:pointer;
 margin-right:8px;}
 #youtube:hover{background:rgba(40,167,69,0.85);}
+#delete{background:rgba(220,53,69,0.85);color:#fff;font-family:sans-serif;
+font-size:13px;font-weight:bold;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;}
+#delete:hover{background:rgba(200,35,51,0.9);}
+#delete:active{background:rgba(189,33,48,0.95);}
 body:hover #prev,body:hover #next,body:hover #bottomCenter{opacity:1;pointer-events:auto;}
 </style></head>
 <body>
@@ -817,6 +826,7 @@ body:hover #prev,body:hover #next,body:hover #bottomCenter{opacity:1;pointer-eve
 <button id="next" onclick="window.location='commstat://video-next';">Next &#9654;</button>
 <div id="bottomCenter">
 <button id="youtube" onclick="window.location='commstat://video-youtube/__VIDEO_ID__';">YouTube</button>
+<button id="delete" onclick="window.location='commstat://video-delete';">Delete</button>
 </div>
 <script>
 function layoutVideoBox() {
@@ -929,6 +939,12 @@ class CustomWebEnginePage(QWebEnginePage):
                     self.parent_widget._open_external_link(youtube_url, "YouTube video")
                 else:
                     QDesktopServices.openUrl(QUrl(youtube_url))
+            return False
+
+        # Handle video Delete
+        if url_str == "commstat://video-delete":
+            if hasattr(self.parent_widget, '_on_video_delete'):
+                self.parent_widget._on_video_delete()
             return False
 
         # Handle the Map Filter dropdown's Help entry
@@ -2221,6 +2237,15 @@ class DatabaseManager:
             return row[0] if row else None
         return self._execute(op, None)
 
+    def qrz_type_exists(self, qrz_type: int) -> bool:
+        """True if any qrz contact carries the given type. Each 1-click
+        preset dataset marks its rows with a distinct type, so this detects
+        an installed preset even after its watchlist is renamed."""
+        def op(cursor, conn):
+            cursor.execute("SELECT COUNT(*) FROM qrz WHERE type = ?", (qrz_type,))
+            return cursor.fetchone()[0] > 0
+        return self._execute(op, False)
+
     def add_qrz_manual(self, callsign: str, name: str = "", city: str = "",
                        state: str = "", grid: str = "") -> Optional[int]:
         """Insert a manually entered contact into the qrz table.
@@ -2368,10 +2393,11 @@ class DatabaseManager:
     def get_qrz_export_data(self) -> Tuple[List[str], List[Tuple]]:
         """Return (column_names, rows) for every qrz row, for CSV export.
 
-        Excludes QRZ_EXPORT_EXCLUDED_COLUMNS.
+        Excludes QRZ_EXPORT_EXCLUDED_COLUMNS. Only includes type = 1 rows
+        with a non-null lat and lon.
         """
         def op(cursor, conn):
-            cursor.execute("SELECT * FROM qrz WHERE type = 1")
+            cursor.execute("SELECT * FROM qrz WHERE type = 1 AND lat IS NOT NULL AND lon IS NOT NULL")
             columns = [d[0] for d in cursor.description]
             keep_indices = [i for i, c in enumerate(columns) if c not in QRZ_EXPORT_EXCLUDED_COLUMNS]
             kept_columns = [columns[i] for i in keep_indices]
@@ -2386,7 +2412,8 @@ class DatabaseManager:
         with the owning watchlist's name and a Yes/No flag from qrz.active
         (per-contact, shared across every watchlist). The grid column uses
         grid_override when set, falling back to grid otherwise — same
-        precedence as the map overlay.
+        precedence as the map overlay. Only includes watchlists where
+        preset = 0.
         """
         excluded = QRZ_EXPORT_EXCLUDED_COLUMNS | {"id"}
 
@@ -2403,6 +2430,7 @@ class DatabaseManager:
                 "FROM watchlistMembers wm "
                 "JOIN watchlists w ON w.id = wm.watchlist_id "
                 "JOIN qrz q ON q.id = wm.member_id "
+                "WHERE w.preset = 0 "
                 "ORDER BY w.name, q.callsign"
             )
             columns = ["Watchlist", "Active"] + kept_qrz_columns
@@ -2415,13 +2443,15 @@ class DatabaseManager:
 
     def get_watchlist_callsigns_export_data(self) -> List[Tuple[str, List[str]]]:
         """Return [(watchlist_name, [callsigns])] for every watchlist that has
-        members, for the Watchlist Callsigns bulk-import export."""
+        members, for the Watchlist Callsigns bulk-import export. Only
+        includes watchlists where preset = 0."""
         def op(cursor, conn):
             cursor.execute(
                 "SELECT w.name, q.callsign "
                 "FROM watchlistMembers wm "
                 "JOIN watchlists w ON w.id = wm.watchlist_id "
                 "JOIN qrz q ON q.id = wm.member_id "
+                "WHERE w.preset = 0 "
                 "ORDER BY w.name, q.callsign"
             )
             grouped: Dict[str, List[str]] = {}
@@ -2853,6 +2883,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._map_filter_state: str = "off"         # Session-only; resets on restart. One of: off, map, custom
         self._map_bounds: Optional[Tuple[float, float, float, float]] = None  # (south, west, north, east); only set while _map_filter_state == "map"
         self._custom_filter_mode: str = "or"         # Session-only; joins the Custom Filtering boxes. One of: and, or
+        self._message_filter_active: bool = False    # Session-only; message table filter row toggle
+        self._message_filter_values: Dict[int, str] = {}  # Session-only; per-column filter text for message_table
 
         # Run startup status checks and initiate TCP connections.
         # Order: User Settings -> Groups -> JS8 Connectors -> QRZ Settings.
@@ -2869,6 +2901,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_weather_radar_action()
         self._setup_radar_refresh_timer()
         QTimer.singleShot(0, self._apply_restored_view)
+        # Scrollbar visibility (which the FILTER labels' x position accounts
+        # for) isn't settled until the window is actually shown and laid
+        # out, so do one final reposition once that's happened.
+        QTimer.singleShot(0, self._reposition_message_filter_btn)
+        QTimer.singleShot(0, self._reposition_statrep_filter_btn)
 
     def _setup_window(self) -> None:
         """Configure window properties (size, title, icon)."""
@@ -3764,10 +3801,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Export section - dump database tables to CSV
         add_section_header(self.tools_menu, "Export")
-        create_action(self.tools_menu, "Contacts", "export_contacts", self._on_export_contacts)
+        create_action(self.tools_menu, "QRZ Contacts", "export_contacts", self._on_export_contacts)
         create_action(self.tools_menu, "Status Reports", "export_statreps", self._on_export_statreps)
-        create_action(self.tools_menu, "Watchlist Members", "export_watchlist_members", self._on_export_watchlist_members)
         create_action(self.tools_menu, "Watchlist Callsigns", "export_watchlist_callsigns", self._on_export_watchlist_callsigns)
+        create_action(self.tools_menu, "Watchlist Members", "export_watchlist_members", self._on_export_watchlist_members)
 
         # HAMSQL Tools section - solar/radio image dialogs
         add_section_header(self.tools_menu, "HAMSQL Tools")
@@ -3783,6 +3820,7 @@ class MainWindow(QtWidgets.QMainWindow):
         create_action(self.tools_menu, "Grid Finder", "grid_finder", self._on_grid_finder)
         create_action(self.tools_menu, "Data Manager", "data_manager", self._on_data_manager)
         create_action(self.tools_menu, "Video Manager", "video_manager", self._on_video_manager)
+        create_action(self.tools_menu, "Maintenance", "maintenance", self._on_maintenance)
 
         self._fix_plain_menu_indent(self.tools_menu)
 
@@ -4110,16 +4148,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._setup_table_widget(self.statrep_table, STATREP_HEADERS)
         self.statrep_table.horizontalHeader().setFixedHeight(30)
+        # Blank the built-in "Remarks" header text - it's drawn instead as a
+        # floating label (below) so it can be centered in its half of the
+        # gap between the "Pol" column and the FILTER link, matching the
+        # record counter centered in the other half.
+        remarks_header_item = self.statrep_table.horizontalHeaderItem(len(STATREP_HEADERS) - 1)
+        if remarks_header_item:
+            remarks_header_item.setText("")
 
         self.statrep_table.itemClicked.connect(self._on_statrep_click)
         self.statrep_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.statrep_table.customContextMenuRequested.connect(
             lambda pos: self._show_table_copy_menu(self.statrep_table, pos)
         )
-        self._hovered_callsign_item = None
-        self.statrep_table.viewport().setMouseTracking(True)
-        self.statrep_table.viewport().installEventFilter(self)
-
         # The Custom Filtering bar sits directly above the table's column
         # headers, so both live in a container that takes the splitter slot.
         self.statrep_container = QtWidgets.QWidget(self.central_widget)
@@ -4131,6 +4172,48 @@ class MainWindow(QtWidgets.QMainWindow):
         _v.addWidget(self.statrep_table)
 
         self.content_splitter.insertWidget(0, self.statrep_container)
+
+        # FILTER toggle - same underlined-word style/position as the message
+        # table's, floating over this table's title bar far right edge.
+        # Toggles the Map Filter's Custom state (shared with the map's own
+        # Filter dropdown, so both stay in sync).
+        title_fg = self.config.get_color('title_bar_foreground')
+        self.statrep_filter_btn = ClickableLabel("FILTER", self.statrep_table)
+        self.statrep_filter_btn.setStyleSheet(
+            "QLabel { background: transparent; color: %s;"
+            " font-family: Roboto; font-size: 13px; font-weight: bold;"
+            " text-decoration: underline; }" % title_fg
+        )
+        self.statrep_filter_btn.setCursor(Qt.PointingHandCursor)
+        self.statrep_filter_btn.clicked.connect(self._toggle_statrep_custom_filter)
+        self.statrep_filter_btn.adjustSize()
+
+        # "Remarks" label and record counter split the gap between the
+        # "Pol" column and the FILTER link in half, each centered in its
+        # own half; see _reposition_statrep_filter_btn(). The counter's
+        # text is updated in _load_statrep_data() to track the current
+        # filter.
+        self.statrep_remarks_label = QtWidgets.QLabel("Remarks", self.statrep_table)
+        self.statrep_remarks_label.setStyleSheet(
+            "QLabel { background: transparent; color: %s;"
+            " font-family: Roboto; font-size: 13px; font-weight: bold; }" % title_fg
+        )
+        self.statrep_remarks_label.adjustSize()
+
+        self.statrep_count_label = QtWidgets.QLabel("", self.statrep_table)
+        self.statrep_count_label.setStyleSheet(
+            "QLabel { background: transparent; color: %s;"
+            " font-family: Roboto; font-size: 13px; font-weight: bold; }" % title_fg
+        )
+        self.statrep_count_label.adjustSize()
+
+        self.statrep_table.installEventFilter(self)
+        # See the matching comment in _setup_message_table: scrollbar
+        # show/hide doesn't fire a table Resize event on its own.
+        self.statrep_table.verticalScrollBar().rangeChanged.connect(
+            lambda *_: QTimer.singleShot(0, self._reposition_statrep_filter_btn)
+        )
+        self._reposition_statrep_filter_btn()
 
     def _setup_custom_filter_bar(self) -> None:
         """Build the Custom Filtering row shown above the StatRep headers
@@ -4694,6 +4777,66 @@ class MainWindow(QtWidgets.QMainWindow):
         self.alert_prev_btn.setVisible(hovering)
         self.alert_next_btn.setVisible(hovering)
         self.alert_delete_btn.setVisible(hovering and self._alert_has_alert)
+
+    def _reposition_message_filter_btn(self) -> None:
+        """Pin the Filter toggle to the message table's title bar, all the
+        way to the right (left of the vertical scrollbar if visible)."""
+        if not hasattr(self, 'message_filter_btn'):
+            return
+        btn = self.message_filter_btn
+        table = self.message_table
+        margin = 23  # yields a 40px gap to the table edge (23 + 17px scrollbar)
+        scrollbar = table.verticalScrollBar()
+        sb_w = scrollbar.width() if scrollbar and scrollbar.isVisible() else 0
+        header_h = table.horizontalHeader().height()
+        x = table.width() - btn.width() - sb_w - margin
+        y = max(0, (header_h - btn.height()) // 2)
+        btn.move(max(0, x), y)
+        btn.raise_()
+
+    def _reposition_statrep_filter_btn(self) -> None:
+        """Pin the Filter toggle to the StatRep table's title bar, all the
+        way to the right (left of the vertical scrollbar if visible). The
+        gap between the "Pol" column and the FILTER link is split in half:
+        the "Remarks" label is centered in the left half, the record
+        counter in the right half."""
+        if not hasattr(self, 'statrep_filter_btn'):
+            return
+        btn = self.statrep_filter_btn
+        table = self.statrep_table
+        margin = 23  # matches message_filter_btn: 40px gap to the table edge
+        scrollbar = table.verticalScrollBar()
+        sb_w = scrollbar.width() if scrollbar and scrollbar.isVisible() else 0
+        header_h = table.horizontalHeader().height()
+        x = table.width() - btn.width() - sb_w - margin
+        y = max(0, (header_h - btn.height()) // 2)
+        btn.move(max(0, x), y)
+        btn.raise_()
+
+        if hasattr(self, 'statrep_remarks_label') and hasattr(self, 'statrep_count_label'):
+            remarks_label = self.statrep_remarks_label
+            count_label = self.statrep_count_label
+            remarks_col = len(STATREP_HEADERS) - 1
+            left_edge = table.horizontalHeader().sectionViewportPosition(remarks_col)
+            right_edge = x  # left edge of the FILTER link
+            half = max(0, right_edge - left_edge) / 2
+
+            rx = left_edge + half / 2 - remarks_label.width() / 2
+            ry = max(0, (header_h - remarks_label.height()) // 2)
+            remarks_label.move(max(0, int(rx)), ry)
+            remarks_label.raise_()
+
+            cx = right_edge - half / 2 - count_label.width() / 2
+            cy = max(0, (header_h - count_label.height()) // 2)
+            count_label.move(max(0, int(cx)), cy)
+            count_label.raise_()
+
+    def _toggle_statrep_custom_filter(self) -> None:
+        """FILTER label above the StatRep table - toggles the same Custom
+        Filtering state as the Map Filter dropdown's Custom option, so the
+        map and table stay in sync with whichever control was used."""
+        new_state = "off" if self._map_filter_state == "custom" else "custom"
+        self._on_map_filter_set(new_state)
 
     def _setup_map_view_buttons(self) -> None:
         """Apply the default map region as a baseline (buttons live in the
@@ -6194,8 +6337,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_table.customContextMenuRequested.connect(
             lambda pos: self._show_table_copy_menu(self.message_table, pos)
         )
-        self.message_table.viewport().setMouseTracking(True)
-        self.message_table.viewport().installEventFilter(self)
+
+        # Filter toggle - an underlined "Filter" word (same font/size as the
+        # table's title-bar column headers) floating over the title bar's
+        # far right edge; green like Map Filter's active state once toggled.
+        # Positioned in _reposition_message_filter_btn via the table's
+        # Resize events (see eventFilter).
+        title_fg = self.config.get_color('title_bar_foreground')
+        self._message_filter_label_style = (
+            "QLabel {{ background: transparent; color: {color};"
+            " font-family: Roboto; font-size: 13px; font-weight: bold;"
+            " text-decoration: underline; }}"
+        )
+        self.message_filter_btn = ClickableLabel("FILTER", self.message_table)
+        self.message_filter_btn.setStyleSheet(
+            self._message_filter_label_style.format(color=title_fg)
+        )
+        self.message_filter_btn.setCursor(Qt.PointingHandCursor)
+        self.message_filter_btn.clicked.connect(self._toggle_message_filter)
+        self.message_filter_btn.adjustSize()
+        self.message_table.installEventFilter(self)
+        # The vertical scrollbar's own show/hide (as rows load) doesn't fire
+        # a table Resize event, so the button's sb_w-dependent x would go
+        # stale until some unrelated resize happened to trigger it. Its
+        # rangeChanged fires whenever the row count changes the scroll
+        # range, which is exactly when visibility can flip.
+        self.message_table.verticalScrollBar().rangeChanged.connect(
+            lambda *_: QTimer.singleShot(0, self._reposition_message_filter_btn)
+        )
+        self._reposition_message_filter_btn()
 
         self.bottom_splitter.addWidget(self.message_table)
         self.bottom_splitter.setSizes([MAP_WIDTH, max(400, self.width() - MAP_WIDTH)])
@@ -6510,6 +6680,68 @@ class MainWindow(QtWidgets.QMainWindow):
             6, QTableWidgetItem(f"{count} {label}")
         )
 
+        # _populate_table() rebuilds every row from scratch, so the filter
+        # row (and its QLineEdit widgets) has to be re-inserted after each
+        # reload rather than kept alive across it.
+        if self._message_filter_active:
+            self._insert_message_filter_row()
+
+    def _toggle_message_filter(self) -> None:
+        """Toggle the message table's per-column filter row on/off."""
+        self._message_filter_active = not self._message_filter_active
+        if not self._message_filter_active:
+            self._message_filter_values = {}
+        self._load_message_data()
+
+    def _insert_message_filter_row(self) -> None:
+        """Insert row 0 of the message table as a per-column filter input
+        row, mirroring the contacts table's filter row. No filter box is
+        given to Date Time, Freq, or ID (not useful to free-text filter),
+        nor to the blank SNR-color column (col 0, which never has text)."""
+        _EXCLUDED_COLS = {0, 1, 2, 5}  # "", Date Time, Freq, ID
+        table = self.message_table
+
+        table.insertRow(0)
+        filter_font = QtGui.QFont("Kode Mono", -1)
+        filter_font.setPixelSize(13)
+        filter_style = (
+            "QLineEdit { background-color: white; color: #333333; "
+            "border: none; padding: 1px 3px; }"
+        )
+        self._message_filters: List[Optional[QtWidgets.QLineEdit]] = []
+        for col in range(table.columnCount()):
+            if col in _EXCLUDED_COLS:
+                self._message_filters.append(None)
+                continue
+            edit = QtWidgets.QLineEdit()
+            edit.setFont(filter_font)
+            edit.setStyleSheet(filter_style)
+            edit.setText(self._message_filter_values.get(col, ""))
+            edit.textChanged.connect(lambda text, c=col: self._on_message_filter_changed(c, text))
+            table.setCellWidget(0, col, edit)
+            self._message_filters.append(edit)
+        table.setRowHeight(0, 30)
+        self._apply_message_filter()
+
+    def _on_message_filter_changed(self, col: int, text: str) -> None:
+        self._message_filter_values[col] = text
+        self._apply_message_filter()
+
+    def _apply_message_filter(self) -> None:
+        """Show/hide message rows based on the filter row's per-column text.
+        Row 0 (the filter row itself) is always shown."""
+        table = self.message_table
+        filters = {col: val.strip().upper() for col, val in self._message_filter_values.items() if val.strip()}
+        for row in range(1, table.rowCount()):
+            match = True
+            for col, f in filters.items():
+                item = table.item(row, col)
+                cell = item.text().upper() if item else ""
+                if f not in cell:
+                    match = False
+                    break
+            table.setRowHidden(row, not match)
+
 
     def _fetch_earthquake_events(self) -> list:
         """Fetch and cache USGS earthquake GeoJSON. Returns cached data on failure."""
@@ -6623,7 +6855,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     <div style='margin-top:5px;'><a href='{eq.get('url','')}' target='_blank' style='color:#8fd3ff;'>Open USGS Event</a></div>
                 </div>
                 """
-                folium.CircleMarker(
+                eq_marker = folium.CircleMarker(
                     location=[eq["lat"], eq["lon"]],
                     radius=radius,
                     color="#ff3333" if mag >= 7.0 else color,
@@ -6634,7 +6866,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     weight=2 if mag >= 7.0 else 0,
                     popup=folium.Popup(popup_html, max_width=280),
                     tooltip=f"M{mag:.1f} {eq.get('place','')}"
-                ).add_to(fg)
+                )
+                # folium.CircleMarker's path_options() whitelist silently drops
+                # unrecognized kwargs (pane included) — set it directly on the
+                # generated options dict instead of passing it to the constructor.
+                eq_marker.options["pane"] = "eqPane"
+                eq_marker.add_to(fg)
             fg.add_to(m)
         except Exception as e:
             print(f"[Earthquake] map overlay failed: {e}")
@@ -6776,23 +7013,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _watchlist_pin_icon(color: str, shape: str) -> "folium.DivIcon":
-        """Build a 16x16 halo icon for a watchlist pin: translucent fill only,
+        """Build an 8x8 halo icon for a watchlist pin: translucent fill only,
         no outline, as inline SVG so shapes need no plugin and render offline.
         Unknown colors/shapes fall back to the pink circle."""
         hex_color = WATCHLIST_OBJECT_COLORS.get(
             (color or "").upper(), WATCHLIST_OBJECT_COLORS[DEFAULT_OBJECT_COLOR])
         shape = (shape or "").upper()
         if shape == "SQUARE":
-            svg_shape = '<rect x="0" y="0" width="16" height="16"'
+            svg_shape = '<rect x="0" y="0" width="8" height="8"'
         elif shape == "TRIANGLE":
-            svg_shape = '<polygon points="8,0 16,16 0,16"'
+            svg_shape = '<polygon points="4,0 8,8 0,8"'
         else:
-            svg_shape = '<circle cx="8" cy="8" r="8"'
+            svg_shape = '<circle cx="4" cy="4" r="4"'
         html = (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">'
+            '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">'
             f'{svg_shape} fill="{hex_color}" fill-opacity="0.80"/></svg>'
         )
-        return folium.DivIcon(html=html, icon_size=(16, 16), icon_anchor=(8, 8))
+        return folium.DivIcon(html=html, icon_size=(8, 8), icon_anchor=(4, 4))
 
     @staticmethod
     def _event_pin_icon(color: str) -> "folium.DivIcon":
@@ -6822,13 +7059,11 @@ class MainWindow(QtWidgets.QMainWindow):
             shown = self.config.get_shown_watchlists()
             if not shown:
                 return
-            # Leaflet markers live in markerPane (z-index 600), which paints
-            # above the StatRep CircleMarkers' overlayPane (z-index 400)
-            # regardless of add order — so DOM order alone can't put StatRep
-            # pins on top. Route watchlist pins through a custom pane below
-            # overlayPane instead; pointer_events stays on so the halo click
-            # binding below still works.
-            folium.map.CustomPane("watchlistPane", z_index=350, pointer_events=True).add_to(m)
+            # watchlistPane (created up front in _load_map, between eqPane
+            # and weatherPane) keeps these pins below weather radar and
+            # StatRep pins regardless of add order — Leaflet markers
+            # otherwise default to markerPane (z-index 600), which paints
+            # above everything else on this map.
             for callsign, lat, lon, grid, grid_override, object_color, object_shape in \
                     self.db.get_watchlist_pins(shown):
                 try:
@@ -6895,21 +7130,50 @@ class MainWindow(QtWidgets.QMainWindow):
             zoomSnap=0.25,
         )
 
-        # Add local tile layer
+        # Overlay stacking order (bottom to top): earthquakes, watchlist
+        # pins, weather radar, StatRep pins. All four sit in custom panes
+        # created up front (Leaflet's z-index is a fixed style, not derived
+        # from add order, so panes only need to exist before anything is
+        # added to them — creating them all here in one place makes the
+        # ordering self-evident instead of accidental). tilePane (the base
+        # map, z=200) stays under all of these; markerPane (z=600, used by
+        # wildfire icons and left untouched) stays above all of these.
+        folium.map.CustomPane("eqPane", z_index=360, pointer_events=True).add_to(m)
+        folium.map.CustomPane("watchlistPane", z_index=370, pointer_events=True).add_to(m)
+        folium.map.CustomPane("weatherPane", z_index=380, pointer_events=False).add_to(m)
+        folium.map.CustomPane("statrepPane", z_index=390, pointer_events=True).add_to(m)
+
+        # Add local (offline) tile layer — separate light/dark caches so the
+        # offline fallback matches the online map's theme (see tilesPNG2Dark/
+        # and download_dark_tiles.py for how the dark cache was baked).
         folium.raster_layers.TileLayer(
-            tiles='tiles://local/{z}/{x}/{y}.png',
+            tiles=('tilesdark://local/{z}/{x}/{y}.png' if self.config.get_map_theme() == 'dark' else 'tiles://local/{z}/{x}/{y}.png'),
             name='Local Tiles',
             attr='Local Tiles',
             max_zoom=8,
             control=False
         ).add_to(m)
 
-        # Add online tile layer (CartoDB Dark Matter) for zoom > 8, only if internet available
+        # Add online tile layer (ESRI Dark Gray Canvas) for zoom > 8, only if internet available
+        #
+        # 2026-08-28: swapped from CartoDB Dark Matter to Esri Dark Gray Canvas.
+        # To bring the old dark map back:
+        #   1. Below, replace the dark-branch URL with
+        #      'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+        #      and name='CartoDB Dark Matter' / attr back to CartoDB's.
+        #   2. Remove the tile_darken_css block further down (search
+        #      "leaflet-tile-pane img") — that contrast/brightness filter was
+        #      added to darken Esri's tiles and isn't needed for CartoDB.
+        #   3. Optional: the offline dark-tile cache (tilesPNG2Dark/, the
+        #      'tilesdark://' scheme registration, and download_dark_tiles.py)
+        #      was baked from Esri tiles. It can stay in place (unused) or be
+        #      removed; the local TileLayer above falls back to 'tiles://'
+        #      (light cache) if you delete the dark branch.
         if self._internet_available:
             folium.raster_layers.TileLayer(
-                tiles=('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' if self.config.get_map_theme() == 'dark' else 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
-                name='CartoDB Dark Matter',
-                attr='CartoDB',
+                tiles=('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' if self.config.get_map_theme() == 'dark' else 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
+                name='ESRI Dark Gray Canvas',
+                attr='Esri, HERE, Garmin, © OpenStreetMap contributors, GIS community',
                 min_zoom=1,
                 control=False
             ).add_to(m)
@@ -6923,7 +7187,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 attr='NOAA NEXRAD',
                 overlay=True,
                 control=False,
-                opacity=0.55
+                opacity=0.55,
+                pane='weatherPane'
             ).add_to(m)
 
             if self.config.get_show_radar_timestamp():
@@ -6962,9 +7227,9 @@ class MainWindow(QtWidgets.QMainWindow):
         US_BBOX = REGION_BBOX["us"]
         region_counts = {"us": 0, "eu": 0, "mideast": 0, "seasia": 0, "world": 0}
 
-        # Member pins render in a custom pane below StatRep's overlayPane (see
-        # _add_watchlist_pins_to_map) so StatRep pins always paint on top,
-        # even sharing a grid square.
+        # Member pins render in watchlistPane (see the pane setup at the top
+        # of this method) so StatRep pins always paint on top, even sharing
+        # a grid square.
         self._add_watchlist_pins_to_map(m)
 
         pin_registry = {}  # statrep_id -> [lat, lon] for bounce/pan; populated inside try
@@ -7099,7 +7364,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         folium.Marker(
                             location=[lat, lon],
                             icon=self._event_pin_icon(self.config.get_color('condition_purple')),
-                            popup=popup
+                            popup=popup,
+                            pane="statrepPane"
                         ).add_to(m)
                     else:
                         # Color conveys status; radius conveys scope.
@@ -7117,7 +7383,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         # Soft halo goes underneath the solid marker.
                         # Halo radius grows with scope; solid is always 8px (radius 4).
                         # interactive=False prevents the halo from stealing clicks from the popup marker.
-                        folium.CircleMarker(
+                        # folium.CircleMarker's path_options() whitelist silently
+                        # drops unrecognized kwargs — pane and interactive included
+                        # — so both are set directly on .options below instead of
+                        # being passed to the constructor.
+                        halo_marker = folium.CircleMarker(
                             radius=radius,
                             fill=True,
                             color=color,
@@ -7125,12 +7395,14 @@ class MainWindow(QtWidgets.QMainWindow):
                             fill_opacity=0.22,
                             opacity=0,
                             weight=2,
-                            location=[lat, lon],
-                            interactive=False
-                        ).add_to(m)
+                            location=[lat, lon]
+                        )
+                        halo_marker.options["interactive"] = False
+                        halo_marker.options["pane"] = "statrepPane"
+                        halo_marker.add_to(m)
 
                         # Solid status marker stays on top and remains clickable.
-                        folium.CircleMarker(
+                        solid_marker = folium.CircleMarker(
                             radius=3,
                             fill=True,
                             color=color,
@@ -7140,7 +7412,9 @@ class MainWindow(QtWidgets.QMainWindow):
                             weight=1,
                             location=[lat, lon],
                             popup=popup
-                        ).add_to(m)
+                        )
+                        solid_marker.options["pane"] = "statrepPane"
+                        solid_marker.add_to(m)
                     pin_registry[str(statrep_id)] = [lat, lon]
                 except Exception as e:
                     print(f"Error adding pin for grid {grid} (statrep_id {statrep_id}): {e}")
@@ -7181,6 +7455,37 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+        # Esri's Dark Gray Canvas (and its baked-offline mirror) render state/
+        # country border lines as raster pixels only a handful of RGB levels
+        # off from the fill — there's no vector layer to restyle, so the only
+        # lever is a CSS filter on the tile images themselves. contrast<100%
+        # pulls light and dark pixels closer together (shrinking the
+        # border-vs-fill gap), then brightness<100% pushes the whole result
+        # back down to a dark absolute level. How bold Esri renders the lines
+        # varies by zoom, which made this fiddly to eyeball-tune from
+        # screenshots: contrast(70%) brightness(80%) read as no change at
+        # all, contrast(60%) brightness(75%) read as "very faint", and
+        # contrast(40%) brightness(60%) erased the lines outright — all at
+        # zoom 6. Settled it by measuring actual line-vs-fill pixel contrast
+        # at the same coordinates across variants instead of guessing further:
+        # baseline ~5.3, the "very faint" complaint was a 52% reduction
+        # (~2.6), "gone" was 74% (~1.4). This value lands at a 29% reduction
+        # (~3.8) — meaningfully darker without crossing into faint. Scoped to
+        # .leaflet-tile-pane so it only touches the base map (weather
+        # radar/pins live in their own custom panes).
+        if self.config.get_map_theme() == "dark":
+            tile_darken_css = """
+<style>
+.leaflet-tile-pane img {
+  filter: contrast(88%) brightness(88%);
+}
+</style>
+"""
+            try:
+                map_html = map_html.replace("</head>", tile_darken_css + "</head>", 1)
+            except Exception:
+                pass
+
         bounce_css = """
 <style>
 @keyframes commstatBounce {
@@ -7194,8 +7499,11 @@ class MainWindow(QtWidgets.QMainWindow):
   92%  { transform: scale(1.3); }
   100% { transform: scale(1.0); }
 }
-/* Specificity 0-3-2 beats the pulse rule's 0-2-2 when both carry !important */
-.leaflet-overlay-pane svg path.leaflet-interactive.commstat-bounce {
+/* Specificity 0-3-2 beats the pulse rule's 0-2-2 when both carry !important.
+   StatRep pins (regular CircleMarkers and Event DivIcon markers alike) all
+   render in the custom statrepPane -> .leaflet-statrep-pane, not the
+   default overlayPane/markerPane, so the selectors target that pane. */
+.leaflet-statrep-pane svg path.leaflet-interactive.commstat-bounce {
   transform-box: fill-box !important;
   transform-origin: center !important;
   animation: commstatBounce 1.1s cubic-bezier(.36,.07,.19,.97) forwards !important;
@@ -7206,7 +7514,7 @@ class MainWindow(QtWidgets.QMainWindow):
    would clobber the marker's position instead of just bouncing it. Folium's
    DivIcon defaults to className "empty" (not "leaflet-div-icon"), so match
    on the svg alone rather than assuming a wrapper class. */
-.leaflet-marker-pane svg.commstat-bounce {
+.leaflet-statrep-pane svg.commstat-bounce {
   transform-box: fill-box !important;
   transform-origin: center !important;
   animation: commstatBounce 1.1s cubic-bezier(.36,.07,.19,.97) forwards !important;
@@ -7217,11 +7525,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Map Filter button - top-right overlay, same visual language as the
         # Videos player's Prev/Next/Delete buttons (rgba(0,0,0,0.65) glass).
-        # Three states: Off (hidden unless the mouse is over the map, same
-        # body:hover trick as the video player's Prev/Next), Map (green,
-        # always visible) and Custom (purple, always visible). Clicking opens
-        # a small dropdown to pick the state; only the display state is
-        # wired up here, actual filtering behavior is added separately.
+        # The dropdown only offers On/Off, which drive the "map" state
+        # (hidden unless the mouse is over the map, same body:hover trick as
+        # the video player's Prev/Next, when off; green and always visible
+        # when on) - this triggers the map-bounds filter only. The "custom"
+        # state (purple, always visible) is a separate state still shown
+        # here when active, but it's reached only via the FILTER labels on
+        # the StatRep/Message tables, not from this dropdown.
         filter_btn_css = """
 <style>
 #commstatMapFilterWrap {
@@ -7248,6 +7558,17 @@ class MainWindow(QtWidgets.QMainWindow):
   transition: opacity .15s ease, background-color .15s ease;
 }
 body:hover #commstatMapFilterBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* Leaflet's default zoom (+/-) control, upper-left of the map, follows the
+   same hover-to-reveal behavior as the filter button above. */
+.leaflet-control-zoom {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s ease;
+}
+body:hover .leaflet-control-zoom {
   opacity: 1;
   pointer-events: auto;
 }
@@ -7313,8 +7634,7 @@ body:hover #commstatMapFilterBtn {
     onclick="document.getElementById('commstatMapFilterMenu').classList.toggle('commstat-menu-open');">{_FILTER_LABELS[filter_state]}</button>
   <div id="commstatMapFilterMenu">
     <button onclick="window.location='commstat://map-filter-set/off';">Off</button>
-    <button onclick="window.location='commstat://map-filter-set/map';">Map</button>
-    <button onclick="window.location='commstat://map-filter-set/custom';">Custom</button>
+    <button onclick="window.location='commstat://map-filter-set/map';">On</button>
     <button class="commstat-menu-help"
       onclick="document.getElementById('commstatMapFilterMenu').classList.remove('commstat-menu-open');window.location='commstat://map-filter-help';">Help</button>
   </div>
@@ -7432,6 +7752,19 @@ window.commstatBouncePin = function(srid) {
         if index > 0:
             self._video_index = index - 1
             self._play_video_at_index()
+
+    def _on_video_delete(self) -> None:
+        """Delete button: remove the currently displayed video row, then
+        show what's now at the same offset (or step back if it was last)."""
+        index = getattr(self, '_video_index', 0)
+        row = self.db.get_video_at_offset(index)
+        if row:
+            self.db.delete_video(row[0])
+        count = self.db.get_video_count()
+        if index >= count:
+            self._video_index = max(0, count - 1)
+        self._update_video_button_indicator()
+        self._play_video_at_index()
 
     def _play_video(self, video_id: str) -> None:
         """Play a YouTube video in the map pane; the map returns when it ends."""
@@ -7582,6 +7915,12 @@ window.commstatBouncePin = function(srid) {
             "6": "condition_purple"
         }
         self._populate_table(self.statrep_table, data, status_colors)
+
+        if hasattr(self, 'statrep_count_label'):
+            count = len(data)
+            self.statrep_count_label.setText(f"{count} Record" + ("" if count == 1 else "s"))
+            self.statrep_count_label.adjustSize()
+            self._reposition_statrep_filter_btn()
 
     def _on_statrep_click(self, item: QTableWidgetItem) -> None:
         """From callsign (col 3) opens detail view; ID (col 5) bounces map pin; others copy text."""
@@ -7812,7 +8151,11 @@ window.commstatBouncePin = function(srid) {
 
     def _resolve_dialog_class(self, module_name: str, class_name: str):
         import importlib
-        return getattr(importlib.import_module(module_name), class_name)
+        import sys
+        module = importlib.import_module(module_name)
+        if DEV_RELOAD_DIALOGS and module_name in sys.modules:
+            module = importlib.reload(module)
+        return getattr(module, class_name)
 
     def _help_theme_colors(self) -> dict:
         """Live theme colors for help popups, so they track a theme change
@@ -8129,6 +8472,10 @@ window.commstatBouncePin = function(srid) {
             elif event.type() == QtCore.QEvent.Leave:
                 self._alert_hovering = False
                 self._update_alert_nav_visibility()
+        elif obj is getattr(self, 'message_table', None) and event.type() == QtCore.QEvent.Resize:
+            self._reposition_message_filter_btn()
+        elif obj is getattr(self, 'statrep_table', None) and event.type() == QtCore.QEvent.Resize:
+            self._reposition_statrep_filter_btn()
         elif obj is getattr(self, 'map_disabled_label', None):
             if event.type() == QtCore.QEvent.Resize:
                 self._reposition_image_nav_buttons()
@@ -8138,41 +8485,7 @@ window.commstatBouncePin = function(srid) {
             elif event.type() == QtCore.QEvent.Leave:
                 self._image_hovering = False
                 self._update_image_nav_visibility()
-        elif hasattr(self, 'statrep_table') and obj is self.statrep_table.viewport():
-            self._handle_callsign_hover(self.statrep_table, event)
-        elif hasattr(self, 'message_table') and obj is self.message_table.viewport():
-            self._handle_callsign_hover(self.message_table, event)
         return super().eventFilter(obj, event)
-
-    def _handle_callsign_hover(self, table, event) -> None:
-        """Underline the From-callsign (and, for StatRep, ID) cell under the mouse
-        to signal it's clickable."""
-        _FROM_COL = 3
-        _ID_COL = 5
-        clickable_cols = {_FROM_COL, _ID_COL} if table is self.statrep_table else {_FROM_COL}
-        if event.type() == QtCore.QEvent.MouseMove:
-            index = table.indexAt(event.pos())
-            item = table.item(index.row(), index.column()) if index.isValid() and index.column() in clickable_cols else None
-        elif event.type() == QtCore.QEvent.Leave:
-            item = None
-        else:
-            return
-
-        if item is self._hovered_callsign_item:
-            return
-
-        if self._hovered_callsign_item is not None:
-            font = self._hovered_callsign_item.font()
-            font.setUnderline(False)
-            self._hovered_callsign_item.setFont(font)
-
-        # Underline alone signals "clickable" - the cursor stays an arrow.
-        if item is not None:
-            font = item.font()
-            font.setUnderline(True)
-            item.setFont(font)
-
-        self._hovered_callsign_item = item
 
     def _on_map_pane_resized(self) -> None:
         """Refit the map pane's content once a resize settles."""
@@ -8693,11 +9006,6 @@ window.commstatBouncePin = function(srid) {
         is_message_table = (table == self.message_table)
         is_statrep_table = (table == self.statrep_table)
 
-        # setRowCount(0) below deletes all items; drop any stale hover reference
-        # first so _handle_callsign_hover never touches a freed QTableWidgetItem.
-        if is_message_table or is_statrep_table:
-            self._hovered_callsign_item = None
-            table.viewport().setCursor(Qt.ArrowCursor)
         table.setRowCount(0)
 
         # Bulk-populate with repaints suppressed - without this, a jump from a
@@ -8804,9 +9112,13 @@ window.commstatBouncePin = function(srid) {
 
                 item = QTableWidgetItem(display_value)
 
-                # Use Kode Mono for remarks/message text columns
-                if (is_statrep_table and col_num == 20) or (is_message_table and col_num == 6):
+                # Use Kode Mono for remarks/message text columns, StatRep's
+                # From/ID/Grid columns, and the Messages table's From/ID columns.
+                # Freq (both tables) stays Roboto.
+                if (is_statrep_table and col_num in (3, 5, 6, 20)) or (is_message_table and col_num in (3, 5, 6)):
                     item.setFont(QtGui.QFont("Kode Mono", -1))
+                elif (is_statrep_table or is_message_table) and col_num == 2:
+                    item.setFont(QtGui.QFont("Roboto", -1))
 
                 # Add tooltip for multi-line remarks
                 if decoded_remarks:
@@ -8824,6 +9136,13 @@ window.commstatBouncePin = function(srid) {
                         font.setBold(True)
                         item.setFont(font)
                         item.setToolTip("Exists in QRZ local cache")
+                    # From is clickable in both tables (opens detail view) —
+                    # style it like a hyperlink; bold above still only
+                    # applies when the callsign is in the QRZ cache.
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+                    item.setForeground(QColor(_LINK_COLOR))
                 # Bold To callsign (col 4) only when it matches the user's callsign
                 elif col_num == 4:
                     to_call = base_callsign(display_value)
@@ -8831,11 +9150,14 @@ window.commstatBouncePin = function(srid) {
                         font = item.font()
                         font.setBold(True)
                         item.setFont(font)
-                # Bold the statrep ID (col 5) — clickable for map bounce/pan.
+                # Bold the statrep ID (col 5) — clickable for map bounce/pan —
+                # and style it like a hyperlink to match the From column.
                 elif is_statrep_table and col_num == 5:
                     font = item.font()
                     font.setBold(True)
+                    font.setUnderline(True)
                     item.setFont(font)
+                    item.setForeground(QColor(_LINK_COLOR))
                 # Bold the message ID (col 5) with a "Delivered" tooltip once the
                 # commsrvr confirms delivery (delivered = 1 in the messages table).
                 elif is_message_table and col_num == 5 and len(row_data) > 8 and row_data[8]:
@@ -8959,6 +9281,12 @@ window.commstatBouncePin = function(srid) {
         self.config.set_shown_watchlists(pruned)
         # Membership or pin styling may have changed — redraw the map.
         self._save_map_position(callback=self._load_map)
+
+    def _on_maintenance(self) -> None:
+        """Open Maintenance window."""
+        Cls = self._resolve_dialog_class("maintenance", "MaintenanceDialog")
+        dialog = Cls(self)
+        dialog.exec_()
 
     def _populate_filter_groups_menu(self) -> None:
         """Populate filter menu with per-group checkboxes above 'Show All Groups'."""
@@ -10463,22 +10791,26 @@ def main() -> None:
         except Exception as e:
             print(f"Warning: Could not replace launcher: {e}")
 
-    # Register tiles:// scheme before QApplication (Qt requirement)
-    _tile_scheme = QWebEngineUrlScheme(b'tiles')
-    _tile_scheme.setFlags(
-        QWebEngineUrlScheme.SecureScheme |
-        QWebEngineUrlScheme.LocalScheme |
-        QWebEngineUrlScheme.CorsEnabled
-    )
-    QWebEngineUrlScheme.registerScheme(_tile_scheme)
+    # Register tiles:// and tilesdark:// schemes before QApplication (Qt requirement)
+    for _scheme_name in (b'tiles', b'tilesdark'):
+        _tile_scheme = QWebEngineUrlScheme(_scheme_name)
+        _tile_scheme.setFlags(
+            QWebEngineUrlScheme.SecureScheme |
+            QWebEngineUrlScheme.LocalScheme |
+            QWebEngineUrlScheme.CorsEnabled
+        )
+        QWebEngineUrlScheme.registerScheme(_tile_scheme)
 
     QtWidgets.QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
 
-    # Install tile scheme handler on the default profile
+    # Install tile scheme handlers on the default profile (light + dark
+    # offline caches; see _load_map for the theme-based selection)
     _tile_handler = TileSchemeHandler("tilesPNG2")
     QWebEngineProfile.defaultProfile().installUrlSchemeHandler(b'tiles', _tile_handler)
+    _tile_handler_dark = TileSchemeHandler("tilesPNG2Dark")
+    QWebEngineProfile.defaultProfile().installUrlSchemeHandler(b'tilesdark', _tile_handler_dark)
 
     # Allow media autoplay in web views (video playback starts without an
     # in-page click; play is triggered from the app UI instead)

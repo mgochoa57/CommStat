@@ -105,7 +105,7 @@ class GroupMessageDialog(QDialog):
         self.selected_group: str = ""
         self.msg_id: str         = ""
         self._pending_message: str   = ""
-        self._pending_callsign: str  = ""
+        self._pending_save_data: Optional[dict] = None
         self._message_is_expanded: bool = False
 
         self._commsrvr_result.connect(self._on_commsrvr_result)
@@ -482,11 +482,21 @@ class GroupMessageDialog(QDialog):
     # Commsrvr / database
     # -------------------------------------------------------------------------
 
-    def _submit_to_commsrvr_async(self, frequency: int, callsign: str, message_data: str, now: str) -> None:
+    def _submit_to_commsrvr_async(self, frequency: int, callsign: str, message_data: str, now: str, on_complete=None) -> None:
+        """Start background thread to submit the message to commsrvr.
+
+        Args:
+            on_complete: Optional callable(global_id: int) invoked after the
+                request completes (success or failure). global_id is 0 on
+                failure or when the server returns a non-numeric response.
+        """
         def submit_thread():
             import netguard
+            global_id = 0
             if not netguard.guard("Message internet submission"):
                 self._commsrvr_result.emit("ERR::Off-Grid Mode is enabled — switch back to ONLINE to send.")
+                if on_complete:
+                    on_complete(global_id)
                 return
             try:
                 data_string = f"{now}\t{frequency}\t0\t30\t{message_data}"
@@ -495,10 +505,11 @@ class GroupMessageDialog(QDialog):
                 with urllib.request.urlopen(req, timeout=5, context=create_verified_ssl_context()) as response:
                     result = response.read().decode('utf-8').strip()
                 if result.isdigit():
-                    print(f"[Commsrvr] Message submitted successfully (global_id={result})")
+                    global_id = int(result)
+                    print(f"[Commsrvr] Message submitted successfully (global_id={global_id})")
                 else:
                     print(f"[Commsrvr] Message submission failed — server returned: {result}")
-                self._commsrvr_result.emit(result)
+                    self._commsrvr_result.emit(result)
             except Exception as e:
                 reason = getattr(e, 'reason', e)
                 if isinstance(reason, TimeoutError):
@@ -507,6 +518,9 @@ class GroupMessageDialog(QDialog):
                     err = f"ERR::Connection error — {e}"
                 print(f"[Commsrvr] Message submission failed — {err[5:]}")
                 self._commsrvr_result.emit(err)
+            finally:
+                if on_complete:
+                    on_complete(global_id)
 
         threading.Thread(target=submit_thread, daemon=True).start()
 
@@ -515,34 +529,43 @@ class GroupMessageDialog(QDialog):
             from qrz_lookup import InternetDeliveryFailureDialog
             parent = self if self.isVisible() else (self.parent() or self)
             InternetDeliveryFailureDialog(result[5:], parent=parent).exec_()
-        elif result.isdigit():
-            if self.isVisible():
-                self._save_to_database(self._pending_callsign, self._pending_message_raw, frequency=0)
-                if self.refresh_callback:
-                    self.refresh_callback()
-                self.accept()
 
-    def _save_to_database(self, callsign: str, message: str, frequency: int = 0) -> None:
+    def _capture_save_data(self, callsign: str, message: str, frequency: int = 0) -> dict:
+        """Snapshot Qt widget state on the main thread before a background submit."""
         now = QDateTime.currentDateTime()
-        datetime_str = now.toUTC().toString("yyyy-MM-dd HH:mm:ss")
-        date_only    = now.toUTC().toString("yyyy-MM-dd")
-        source = 3 if self.rig_combo.currentText() == INTERNET_RIG else 1
+        return {
+            'callsign': callsign,
+            'message': message,
+            'frequency': frequency,
+            'datetime_str': now.toUTC().toString("yyyy-MM-dd HH:mm:ss"),
+            'date_only': now.toUTC().toString("yyyy-MM-dd"),
+            'source': 3 if self.rig_combo.currentText() == INTERNET_RIG else 1,
+            'target': "@" + self.group_combo.currentText(),
+            'msg_id': self.msg_id,
+        }
 
+    def _save_to_database(self, saved_data: dict, global_id: int = 0) -> None:
+        """Save the message to the database.
+
+        Args:
+            saved_data: Snapshot from _capture_save_data().
+            global_id: The global ID returned by the commsrvr server (0 if unknown).
+        """
         with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO messages "
-                "(datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (datetime_str, date_only, frequency, 30,
-                 source, self.msg_id, callsign,
-                 "@" + self.group_combo.currentText(), message)
+                "(global_id, datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (global_id, saved_data['datetime_str'], saved_data['date_only'], saved_data['frequency'], 30,
+                 saved_data['source'], saved_data['msg_id'], saved_data['callsign'],
+                 saved_data['target'], saved_data['message'])
             )
             conn.commit()
 
-        if frequency > 0 and self.delivery_combo.currentText() != "Limited Reach":
-            group        = "@" + self.group_combo.currentText()
-            message_data = f"{callsign}: {group} MSG ,{self.msg_id},{message},{{^%}}"
-            self._submit_to_commsrvr_async(frequency, callsign, message_data, datetime_str)
+    def _refresh_and_close(self) -> None:
+        if self.refresh_callback:
+            self.refresh_callback()
+        self.accept()
 
     # -------------------------------------------------------------------------
     # Actions
@@ -570,7 +593,7 @@ class GroupMessageDialog(QDialog):
         callsign, message = result
         tx_message = self._build_message(message)
         self._show_info(f"CommStat has saved:\n{tx_message}")
-        self._save_to_database(callsign, message)
+        self._save_to_database(self._capture_save_data(callsign, message))
 
         if self.refresh_callback:
             self.refresh_callback()
@@ -595,15 +618,19 @@ class GroupMessageDialog(QDialog):
         callsign, message = result
 
         if rig_name == INTERNET_RIG:
-            self._pending_callsign = callsign
-            self._pending_message_raw = message
             self._pending_message  = self._build_message(message)
+            self._pending_save_data = self._capture_save_data(callsign, message, 0)
             now = QDateTime.currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss")
             message_data = (
                 f"{callsign}: @{self.group_combo.currentText()}"
                 f" MSG ,{self.msg_id},{message},{{^%3}}"
             )
-            self._submit_to_commsrvr_async(0, callsign, message_data, now)
+
+            def _on_internet_commsrvr_complete(global_id: int) -> None:
+                self._save_to_database(self._pending_save_data, global_id)
+                QtCore.QTimer.singleShot(0, self._refresh_and_close)
+
+            self._submit_to_commsrvr_async(0, callsign, message_data, now, on_complete=_on_internet_commsrvr_complete)
             return
 
         if "(disconnected)" in rig_name:
@@ -625,8 +652,7 @@ class GroupMessageDialog(QDialog):
             )
             return
 
-        self._pending_message  = self._build_message(message)
-        self._pending_callsign = callsign
+        self._pending_message = self._build_message(message)
 
         try:
             client.call_selected_received.disconnect(self._on_call_selected_for_transmit)
@@ -680,12 +706,21 @@ class GroupMessageDialog(QDialog):
             message_raw = self.message_expanded.toPlainText()
             message = re.sub(r"[^ -~]+", " ", message_raw)
 
-            self._save_to_database(self.callsign, message, frequency)
+            self._pending_save_data = self._capture_save_data(self.callsign, message, frequency)
 
-            if self.refresh_callback:
-                self.refresh_callback()
+            if self.delivery_combo.currentText() == "Limited Reach":
+                # No commsrvr submission — save immediately with no global_id
+                self._save_to_database(self._pending_save_data)
+                self._refresh_and_close()
+            else:
+                group = "@" + self.group_combo.currentText()
+                message_data = f"{self.callsign}: {group} MSG ,{self.msg_id},{message},{{^%}}"
 
-            self.accept()
+                def _on_radio_commsrvr_complete(global_id: int) -> None:
+                    self._save_to_database(self._pending_save_data, global_id)
+                    QtCore.QTimer.singleShot(0, self._refresh_and_close)
+
+                self._submit_to_commsrvr_async(frequency, self.callsign, message_data, self._pending_save_data['datetime_str'], on_complete=_on_radio_commsrvr_complete)
         except Exception as e:
             self._show_error(f"Failed to transmit message: {e}")
 

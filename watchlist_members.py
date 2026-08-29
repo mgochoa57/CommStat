@@ -411,7 +411,7 @@ class WatchlistMembersDialog(QDialog):
         self._on_selection_changed()
 
     def _on_active_toggled(self, member_id: int, checked: bool) -> None:
-        self.db.set_watchlist_member_active(self.watchlist_id, member_id, checked)
+        self.db.set_watchlist_member_active(member_id, checked)
 
     # ── Selection ──────────────────────────────────────────────────────────────
 

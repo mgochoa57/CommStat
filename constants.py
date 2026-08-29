@@ -13,7 +13,13 @@ from typing import Dict
 # Application Identity
 # =============================================================================
 
-VERSION = "4.7"
+VERSION = "4.8"
+
+# When True, MainWindow._resolve_dialog_class() re-imports a dialog's module
+# from disk every time it's opened, instead of reusing the cached import —
+# lets edits to files like maintenance.py show up without restarting
+# CommStat. Leave False for normal/shipped runs.
+DEV_RELOAD_DIALOGS = False
 
 WINDOW_TITLE = f"CommStat (v{VERSION}) by N0DDK"
 WINDOW_SIZE = (1360, 768)
@@ -79,10 +85,12 @@ DEFAULT_COLORS: Dict[str, str] = {
     'time_background': '#282864',          # Navy blue
     'time_foreground': '#FFFF00',
     # StatRep condition indicators (traffic light)
-    'condition_green': '#28A745',          # Good / normal
+    #'condition_green': '#28A745',          # Good / normal
+    'condition_green': '#20AA20',          # Good / normal
     #'condition_yellow': '#FFFF77',         # Caution / degraded
     'condition_yellow': '#FFDC78',         # Caution / degraded
-    'condition_red': '#DC3534',            # Critical / emergency
+    #'condition_red': '#DC3534',            # Critical / emergency
+    'condition_red': '#CC2020',            # Critical / emergency
     'condition_gray': '#6C757D',           # Unknown / no data
     'condition_purple': '#8000FF',         # Event marker
     # Data tables
@@ -103,11 +111,13 @@ DEFAULT_COLORS: Dict[str, str] = {
 # Display name -> hex. The friendly names are what users see and what the
 # watchlists table stores.
 WATCHLIST_OBJECT_COLORS: Dict[str, str] = {
-    'YELLOW': '#ffff00',
+    'BLUE':   '#0000FF',
+    'GREEN':  '#00FF00',
     'ORANGE': '#f07800',
     'PINK':   '#ff66ff',
     'PURPLE': '#8000ff',
-    'BLUE':   '#6666FF',
+    'RED':    '#FF0000',
+    'YELLOW': '#ffff00',
 
 }
 WATCHLIST_OBJECT_SHAPES = ['CIRCLE', 'SQUARE', 'TRIANGLE']

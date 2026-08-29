@@ -45,6 +45,7 @@ _COL_ADD     = "#28a745"
 _COL_EDIT    = "#007bff"
 _COL_DELETE  = "#dc3545"
 _COL_MEMBERS = "#6f42c1"
+_COL_PRESETS = "#17a2b8"
 _COL_CLOSE   = "#555555"
 _COL_SAVE    = "#28a745"
 _COL_CANCEL  = "#555555"
@@ -53,8 +54,8 @@ _COL_HELP    = COLOR_BTN_HELP
 _WIN_W = 760
 _WIN_H = 400
 
-_TABLE_COLS = ["Watchlist Name", "Members", "Object Color", "Object Shape", "Comment"]
-_COL_NAME, _COL_COUNT, _COL_OBJCOLOR, _COL_OBJSHAPE, _COL_COMMENT = range(5)
+_TABLE_COLS = ["Watchlist Name", "Members", "Active", "Object Color", "Object Shape", "Comment"]
+_COL_NAME, _COL_COUNT, _COL_ACTIVE, _COL_OBJCOLOR, _COL_OBJSHAPE, _COL_COMMENT = range(6)
 
 _SHAPE_GLYPHS = {"CIRCLE": "●", "SQUARE": "■", "TRIANGLE": "▲"}
 
@@ -121,6 +122,7 @@ class WatchlistsDialog(QDialog):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(_COL_NAME,     QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(_COL_COUNT,    QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(_COL_ACTIVE,   QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(_COL_OBJCOLOR, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(_COL_OBJSHAPE, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(_COL_COMMENT,  QHeaderView.Stretch)
@@ -156,6 +158,7 @@ class WatchlistsDialog(QDialog):
         self.btn_edit    = make_button("Edit",    _COL_EDIT,    80)
         self.btn_delete  = make_button("Delete",  _COL_DELETE,  80)
         self.btn_members = make_button("Members", _COL_MEMBERS, 80)
+        self.btn_presets = make_button("Presets", _COL_PRESETS, 80)
         self.btn_save    = make_button("Save",    _COL_SAVE,    80)
         self.btn_cancel  = make_button("Cancel",  _COL_CANCEL,  80)
         self.btn_help    = make_button("Help",    _COL_HELP,    80)
@@ -172,6 +175,7 @@ class WatchlistsDialog(QDialog):
         self.btn_edit.clicked.connect(self._on_edit)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_members.clicked.connect(self._on_members)
+        self.btn_presets.clicked.connect(self._on_presets)
         self.btn_save.clicked.connect(lambda: self._exit_edit_mode(save=True))
         self.btn_cancel.clicked.connect(lambda: self._exit_edit_mode(save=False))
         self.btn_help.clicked.connect(self._on_help)
@@ -181,6 +185,7 @@ class WatchlistsDialog(QDialog):
         btn_row.addWidget(self.btn_edit)
         btn_row.addWidget(self.btn_delete)
         btn_row.addWidget(self.btn_members)
+        btn_row.addWidget(self.btn_presets)
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(self.btn_cancel)
         btn_row.addStretch()
@@ -196,6 +201,7 @@ class WatchlistsDialog(QDialog):
         self._edit_name = ""
         watchlists = self.db.get_all_watchlists_details()
         counts = self.db.get_watchlist_member_counts()
+        active_counts = self.db.get_watchlist_active_member_counts()
         self.table.setRowCount(0)
         mono = QtGui.QFont("Kode Mono")
 
@@ -207,6 +213,7 @@ class WatchlistsDialog(QDialog):
             values = [
                 w["name"],
                 str(counts.get(w["name"], 0)),
+                str(active_counts.get(w["name"], 0)),
                 color.title(),
                 f"{_SHAPE_GLYPHS.get(shape, '●')} {shape.title()}",
                 w["comment"],
@@ -215,7 +222,7 @@ class WatchlistsDialog(QDialog):
                 item = QTableWidgetItem(val)
                 item.setFont(mono)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-                if col == _COL_COUNT:
+                if col in (_COL_COUNT, _COL_ACTIVE):
                     item.setTextAlignment(Qt.AlignCenter)
                 elif col == _COL_OBJCOLOR:
                     # Swatch of the actual object color next to its name.
@@ -328,6 +335,7 @@ class WatchlistsDialog(QDialog):
         self.btn_edit.setVisible(False)
         self.btn_delete.setVisible(False)
         self.btn_members.setVisible(False)
+        self.btn_presets.setVisible(False)
         self.btn_save.setVisible(True)
         self.btn_cancel.setVisible(True)
         self.btn_close.setEnabled(False)
@@ -392,6 +400,7 @@ class WatchlistsDialog(QDialog):
         self.btn_edit.setVisible(True)
         self.btn_delete.setVisible(True)
         self.btn_members.setVisible(True)
+        self.btn_presets.setVisible(True)
         self.btn_save.setVisible(False)
         self.btn_cancel.setVisible(False)
         self.btn_close.setEnabled(True)
@@ -454,6 +463,38 @@ class WatchlistsDialog(QDialog):
         from watchlist_members import WatchlistMembersDialog
         WatchlistMembersDialog(self.db, watchlist_id, name, self).exec_()
         # Refresh the Members count column.
+        self._load()
+
+    def _on_presets(self) -> None:
+        if self._in_edit_mode:
+            return
+        # Parent is the main window (see _on_manage_watchlists); the preset
+        # install reuses its _handle_db_update to execute the server SQL.
+        main_win = self.parent()
+        handler = getattr(main_win, "_handle_db_update", None)
+        if handler is None:
+            QMessageBox.critical(self, "Error", "Preset installs are unavailable.")
+            return
+
+        # Same callsign priority chain as the heartbeat: connected rig first,
+        # then the configured callsign.
+        callsign = ""
+        try:
+            callsign = next(
+                (cs for cs in main_win.rig_callsigns.values() if cs), "")
+        except Exception:
+            pass
+        if not callsign:
+            try:
+                callsign = self.db.get_user_settings()[0] or ""
+            except Exception:
+                pass
+        callsign = callsign or "UNKNOWN"
+
+        # Deferred import keeps this module importable standalone.
+        from one_click_watchlists import OneClickWatchlistsDialog
+        OneClickWatchlistsDialog(self.db, handler, callsign, self).exec_()
+        # Show any freshly installed watchlist and its member count.
         self._load()
 
 

@@ -9,9 +9,13 @@ Point-to-point JS8 message to a single callsign, sent directly or via a relay
 that has been observed hearing the target.
 """
 
+import base64
 import os
 import re
 import sqlite3
+import threading
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from html import escape
 from typing import TYPE_CHECKING
@@ -34,6 +38,7 @@ from constants import (
     CONTACTS_RETENTION_HOURS,
 )
 from id_utils import generate_time_based_id
+from little_gucci import create_verified_ssl_context
 from qrz_client import get_qrz_cached
 from ui_helpers import (make_button, apply_standard_dialog_chrome, connect_single,
                         show_help_dialog)
@@ -56,6 +61,9 @@ WINDOW_WIDTH  = 600
 WINDOW_HEIGHT = 460
 
 QRZ_MISS_TEXT = "Callsign not found in local cache"
+
+_COMMSRVR = base64.b64decode("aHR0cHM6Ly9jb21tc3RhdC5hcHA=").decode()
+_DATAFEED = _COMMSRVR + "/datafeed-808585.php"
 
 NO_RELAY_LABEL = "NO-RELAY"
 UNKNOWN_SNR_SENTINEL = -99
@@ -220,6 +228,8 @@ class _UpperCaseEventFilter(QtCore.QObject):
 class JS8DirectMessageDialog(QDialog):
     """Send a JS8 directed message to a single callsign, optionally via a relay."""
 
+    _commsrvr_result = QtCore.pyqtSignal(str)
+
     def __init__(
         self,
         tcp_pool: "TCPConnectionPool" = None,
@@ -234,6 +244,8 @@ class JS8DirectMessageDialog(QDialog):
 
         self._current_freq_mhz = None
         self._pending_payload = ""
+
+        self._commsrvr_result.connect(self._on_commsrvr_result)
 
         self.setWindowTitle("JS8 Direct Message")
         self.setMinimumSize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -962,7 +974,60 @@ class JS8DirectMessageDialog(QDialog):
         client.call_selected_received.connect(self._on_call_selected_for_transmit)
         client.get_call_selected()
 
-    def _save_to_local_messages(self, from_callsign: str) -> None:
+    def _submit_to_commsrvr_async(self, frequency: int, callsign: str, message_data: str, now: str, on_complete=None) -> None:
+        """Start background thread to submit the direct message to commsrvr.
+
+        Args:
+            on_complete: Optional callable(global_id: int) invoked after the
+                request completes (success or failure). global_id is 0 on
+                failure or when the server returns a non-numeric response.
+        """
+        def submit_thread():
+            import netguard
+            global_id = 0
+            if not netguard.guard("Direct message internet submission"):
+                self._commsrvr_result.emit("ERR::Off-Grid Mode is enabled — switch back to ONLINE to send.")
+                if on_complete:
+                    on_complete(global_id)
+                return
+            try:
+                data_string = f"{now}\t{frequency}\t0\t30\t{message_data}"
+                post_data = urllib.parse.urlencode({'cs': callsign, 'data': data_string}).encode('utf-8')
+                req = urllib.request.Request(_DATAFEED, data=post_data, method='POST')
+                with urllib.request.urlopen(req, timeout=5, context=create_verified_ssl_context()) as response:
+                    result = response.read().decode('utf-8').strip()
+                if result.isdigit():
+                    global_id = int(result)
+                    print(f"[Commsrvr] Direct message submitted successfully (global_id={global_id})")
+                else:
+                    print(f"[Commsrvr] Direct message submission failed — server returned: {result}")
+                    self._commsrvr_result.emit(result)
+            except Exception as e:
+                reason = getattr(e, 'reason', e)
+                if isinstance(reason, TimeoutError):
+                    err = "ERR::Server timeout — the server did not respond in time."
+                else:
+                    err = f"ERR::Connection error — {e}"
+                print(f"[Commsrvr] Direct message submission failed — {err[5:]}")
+                self._commsrvr_result.emit(err)
+            finally:
+                if on_complete:
+                    on_complete(global_id)
+
+        threading.Thread(target=submit_thread, daemon=True).start()
+
+    def _on_commsrvr_result(self, result: str) -> None:
+        if result.startswith("ERR::"):
+            from qrz_lookup import InternetDeliveryFailureDialog
+            parent = self if self.isVisible() else (self.parent() or self)
+            InternetDeliveryFailureDialog(result[5:], parent=parent).exec_()
+
+    def _refresh_and_close(self) -> None:
+        if self.refresh_callback:
+            self.refresh_callback()
+        self.accept()
+
+    def _save_to_local_messages(self, from_callsign: str, global_id: int = 0) -> None:
         """Write the just-transmitted direct message to the local messages
         table so it shows up in the message log, mirroring group_message.py.
 
@@ -973,6 +1038,9 @@ class JS8DirectMessageDialog(QDialog):
         from_callsign. db follows the group_message convention of 30 for a
         locally-originated message. The message body retains its ||-encoded
         newlines; the table display decodes them back to \\n.
+
+        Args:
+            global_id: The global ID returned by the commsrvr server (0 if unknown).
         """
         now = QDateTime.currentDateTimeUtc()
         datetime_str = now.toString("yyyy-MM-dd HH:mm:ss")
@@ -984,9 +1052,9 @@ class JS8DirectMessageDialog(QDialog):
             with sqlite3.connect(DATABASE_FILE, timeout=10) as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO messages "
-                    "(datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (datetime_str, date_only, freq_hz, 30, 1,
+                    "(global_id, datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (global_id, datetime_str, date_only, freq_hz, 30, 1,
                      self._pending_msg_id, from_cs,
                      self._pending_target, self._pending_message_text)
                 )
@@ -1023,10 +1091,6 @@ class JS8DirectMessageDialog(QDialog):
         try:
             client.send_tx_message(self._pending_payload)
 
-            self._save_to_local_messages(client.callsign)
-            if self.refresh_callback:
-                self.refresh_callback()
-
             now = QDateTime.currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss")
             print(f"\n{'='*60}")
             print(f"RF DIRECT MESSAGE TRANSMITTED - {now} UTC")
@@ -1038,7 +1102,21 @@ class JS8DirectMessageDialog(QDialog):
             print(f"  Full TX:  {self._pending_payload}")
             print(f"{'='*60}\n")
 
-            self.accept()
+            # Report the transmitted message to commsrvr so the global feed
+            # picks it up; the server's reply is the assigned global_id,
+            # recorded on the local row once the request completes.
+            from_cs = (client.callsign or "").split("/")[0].strip().upper()
+            freq_hz = int(round(self._pending_freq_mhz * 1_000_000)) if self._pending_freq_mhz else 0
+            message_data = (
+                f"{from_cs}: {self._pending_target} MSG ,{self._pending_msg_id},"
+                f"{self._pending_message_text},{{^%}}"
+            )
+
+            def _on_commsrvr_complete(global_id: int) -> None:
+                self._save_to_local_messages(client.callsign, global_id)
+                QtCore.QTimer.singleShot(0, self._refresh_and_close)
+
+            self._submit_to_commsrvr_async(freq_hz, from_cs, message_data, now, on_complete=_on_commsrvr_complete)
         except Exception as e:
             self._show_error(f"Failed to transmit: {e}")
 

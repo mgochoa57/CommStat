@@ -1005,7 +1005,7 @@ class QRZLookupDialog(QDialog):
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 conn.execute(
-                    "UPDATE qrz SET memo = ? WHERE callsign = ?",
+                    "UPDATE qrz SET memo = ? WHERE callsign = ? COLLATE NOCASE",
                     (self.memo_edit.text(), cs)
                 )
                 conn.commit()
@@ -1043,7 +1043,8 @@ class QRZLookupDialog(QDialog):
         ).start()
 
     def _save_to_local_messages(self, from_cs: str, target_cs: str,
-                                message: str, msg_id: str, now: str) -> None:
+                                message: str, msg_id: str, now: str,
+                                global_id: int = 0) -> None:
         """Insert a just-sent internet direct message into the local messages
         table, mirroring group_message.py's _save_to_database.
 
@@ -1052,14 +1053,17 @@ class QRZLookupDialog(QDialog):
         callsign goes in target (matching how received direct messages are
         stored). The message body keeps its ||-encoded newlines; the table
         display decodes them back to \\n.
+
+        Args:
+            global_id: The global ID returned by the commsrvr server (0 if unknown).
         """
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO messages "
-                    "(datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (now, now[:10], 0, 30, 3, msg_id, from_cs, target_cs, message)
+                    "(global_id, datetime, date, freq, db, source, msg_id, from_callsign, target, message) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (global_id, now, now[:10], 0, 30, 3, msg_id, from_cs, target_cs, message)
                 )
                 conn.commit()
         except sqlite3.Error as e:
@@ -1094,7 +1098,7 @@ class QRZLookupDialog(QDialog):
             InternetDeliveryFailureDialog(result[5:], parent=self).exec_()
         elif result.lstrip('-').isdigit():
             if self._pending_dm:
-                self._save_to_local_messages(*self._pending_dm)
+                self._save_to_local_messages(*self._pending_dm, global_id=int(result))
                 self._pending_dm = None
                 if self._refresh_callback:
                     self._refresh_callback()
@@ -1357,7 +1361,7 @@ class JS8MessageDialog(QDialog):
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 conn.execute(
-                    "UPDATE qrz SET memo = ? WHERE callsign = ?",
+                    "UPDATE qrz SET memo = ? WHERE callsign = ? COLLATE NOCASE",
                     (self.contact_memo_edit.text(), cs)
                 )
                 conn.commit()
@@ -2302,7 +2306,7 @@ class StatRepDetailDialog(QDialog):
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 conn.execute(
-                    "UPDATE qrz SET memo = ? WHERE callsign = ?",
+                    "UPDATE qrz SET memo = ? WHERE callsign = ? COLLATE NOCASE",
                     (self.contact_memo_edit.text(), self.callsign)
                 )
                 conn.commit()
@@ -2512,7 +2516,7 @@ class MessageDetailDialog(QDialog):
         try:
             with sqlite3.connect(DB_PATH, timeout=10) as conn:
                 conn.execute(
-                    "UPDATE qrz SET memo = ? WHERE callsign = ?",
+                    "UPDATE qrz SET memo = ? WHERE callsign = ? COLLATE NOCASE",
                     (self.contact_memo_edit.text(), self.callsign)
                 )
                 conn.commit()

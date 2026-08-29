@@ -453,7 +453,7 @@ class GroupEventDialog(QDialog):
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet(
             f"QLabel {{ color: {_PANEL_FG}; background-color: transparent;"
-            f" font-family: 'Kode Mono'; font-size: 11px; font-style: italic;"
+            f" font-family: 'Roboto'; font-size: 15px;"
             f" padding: 2px 10px 4px 10px; }}"
         )
         layout.addWidget(subtitle)
@@ -556,9 +556,9 @@ class GroupEventDialog(QDialog):
         self.pin_combo.setFont(mono_font())
         self.pin_combo.addItem("Yes")
         self.pin_combo.addItem("No")
-        self.pin_combo.setCurrentIndex(1)  # Default to "No"
+        self.pin_combo.setCurrentIndex(0)  # Default to "Yes"
         _apply_combo_popup_style(self.pin_combo)
-        _add_header_cell(3, "Pin to Map:", self.pin_combo)
+        _add_header_cell(3, "Persistant Map Pin:", self.pin_combo)
 
         layout.addLayout(header_grid)
 
