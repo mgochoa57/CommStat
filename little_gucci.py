@@ -1137,6 +1137,7 @@ class ConfigManager:
                 'wildfire_refresh':       config.getint("DIRECTEDCONFIG", "wildfire_refresh",       fallback=30),
                 'shown_watchlists':       config.get("DIRECTEDCONFIG", "shown_watchlists",       fallback=""),
                 'map_theme':              config.get("DIRECTEDCONFIG", "map_theme",              fallback='dark'),
+                'carto_api_key':          config.get("DIRECTEDCONFIG", "carto_api_key",          fallback=""),
             }
         else:
             self.directed_config = {
@@ -1161,6 +1162,7 @@ class ConfigManager:
                 'wildfire_refresh': 30,
                 'shown_watchlists': '',
                 'map_theme': 'dark',
+                'carto_api_key': '',
             }
 
         # Load user-edited UI colors from config.ini [COLORS].
@@ -1326,6 +1328,12 @@ class ConfigManager:
 
     def set_map_theme(self, value: str) -> None:
         self._save_setting('map_theme', value)
+
+    def get_carto_api_key(self) -> str:
+        return self.directed_config.get('carto_api_key', '')
+
+    def set_carto_api_key(self, value: str) -> None:
+        self._save_setting('carto_api_key', value)
 
     def get_earthquake_layer(self) -> bool:
         return bool(self.directed_config.get('earthquake_layer', False))
@@ -4149,9 +4157,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_table_widget(self.statrep_table, STATREP_HEADERS)
         self.statrep_table.horizontalHeader().setFixedHeight(30)
         # Blank the built-in "Remarks" header text - it's drawn instead as a
-        # floating label (below) so it can be centered in its half of the
-        # gap between the "Pol" column and the FILTER link, matching the
-        # record counter centered in the other half.
+        # floating label (below) so it can be centered in section 2 of a
+        # 5-section split of the gap between the "Pol" column and the
+        # FILTER link, matching the record counter centered in section 4.
         remarks_header_item = self.statrep_table.horizontalHeaderItem(len(STATREP_HEADERS) - 1)
         if remarks_header_item:
             remarks_header_item.setText("")
@@ -4188,9 +4196,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statrep_filter_btn.clicked.connect(self._toggle_statrep_custom_filter)
         self.statrep_filter_btn.adjustSize()
 
-        # "Remarks" label and record counter split the gap between the
-        # "Pol" column and the FILTER link in half, each centered in its
-        # own half; see _reposition_statrep_filter_btn(). The counter's
+        # "Remarks" label and record counter sit in sections 2 and 4 of a
+        # 5-section split of the gap between the "Pol" column and the
+        # FILTER link; see _reposition_statrep_filter_btn(). The counter's
         # text is updated in _load_statrep_data() to track the current
         # filter.
         self.statrep_remarks_label = QtWidgets.QLabel("Remarks", self.statrep_table)
@@ -4780,7 +4788,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reposition_message_filter_btn(self) -> None:
         """Pin the Filter toggle to the message table's title bar, all the
-        way to the right (left of the vertical scrollbar if visible)."""
+        way to the right (left of the vertical scrollbar if visible). The
+        record counter is centered in the single gap between the "ID"
+        column and the FILTER link."""
         if not hasattr(self, 'message_filter_btn'):
             return
         btn = self.message_filter_btn
@@ -4794,12 +4804,24 @@ class MainWindow(QtWidgets.QMainWindow):
         btn.move(max(0, x), y)
         btn.raise_()
 
+        if hasattr(self, 'message_count_label'):
+            count_label = self.message_count_label
+            last_col = table.columnCount() - 1
+            left_edge = table.horizontalHeader().sectionViewportPosition(last_col)
+            right_edge = x  # left edge of the FILTER link
+            center = left_edge + (right_edge - left_edge) / 2
+
+            cx = center - count_label.width() / 2
+            cy = max(0, (header_h - count_label.height()) // 2)
+            count_label.move(max(0, int(cx)), cy)
+            count_label.raise_()
+
     def _reposition_statrep_filter_btn(self) -> None:
         """Pin the Filter toggle to the StatRep table's title bar, all the
         way to the right (left of the vertical scrollbar if visible). The
-        gap between the "Pol" column and the FILTER link is split in half:
-        the "Remarks" label is centered in the left half, the record
-        counter in the right half."""
+        gap between the "Pol" column and the FILTER link is split into 5
+        equal sections: 1 empty, 2 "Remarks", 3 empty, 4 the record
+        counter, 5 empty."""
         if not hasattr(self, 'statrep_filter_btn'):
             return
         btn = self.statrep_filter_btn
@@ -4819,14 +4841,14 @@ class MainWindow(QtWidgets.QMainWindow):
             remarks_col = len(STATREP_HEADERS) - 1
             left_edge = table.horizontalHeader().sectionViewportPosition(remarks_col)
             right_edge = x  # left edge of the FILTER link
-            half = max(0, right_edge - left_edge) / 2
+            fifth = max(0, right_edge - left_edge) / 5
 
-            rx = left_edge + half / 2 - remarks_label.width() / 2
+            rx = left_edge + fifth * 1.5 - remarks_label.width() / 2
             ry = max(0, (header_h - remarks_label.height()) // 2)
             remarks_label.move(max(0, int(rx)), ry)
             remarks_label.raise_()
 
-            cx = right_edge - half / 2 - count_label.width() / 2
+            cx = left_edge + fifth * 3.5 - count_label.width() / 2
             cy = max(0, (header_h - count_label.height()) // 2)
             count_label.move(max(0, int(cx)), cy)
             count_label.raise_()
@@ -5678,6 +5700,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(str, msg_type),
             )
+            # A "message" row whose target isn't an @GROUP is always a
+            # direct message to one of our own callsigns (every insert path
+            # gates it that way before calling in here) — pop the banner.
+            if msg_type == "message" and not str(data.get('target', '')).startswith('@'):
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_show_new_message_popup",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, from_callsign),
+                )
             return msg_type
         except sqlite3.IntegrityError as e:
             if id_field in str(e) or "UNIQUE" in str(e):
@@ -6051,6 +6082,14 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         dlg.exec_()
 
+    @QtCore.pyqtSlot(str)
+    def _show_new_message_popup(self, callsign: str) -> None:
+        """Show a notification popup when a message arrives addressed to
+        one of our own callsigns."""
+        from qrz_lookup import NewMessagePopupDialog
+        dlg = NewMessagePopupDialog(callsign=callsign, parent=self)
+        dlg.exec_()
+
     @QtCore.pyqtSlot(set)
     def _refresh_commsrvr_data(self, data_types: set) -> None:
         """Refresh UI for data received from commsrvr server (called from main thread).
@@ -6324,7 +6363,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_table.setRowCount(0)
 
         self._setup_table_widget(self.message_table, [
-            "", "Date Time", "Freq", "From", "To", "ID", "0 Messages"
+            "", "Date Time", "Freq", "From", "To", "ID", ""
         ])
         self.message_table.horizontalHeader().setFixedHeight(30)
         self.message_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -6356,6 +6395,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_filter_btn.setCursor(Qt.PointingHandCursor)
         self.message_filter_btn.clicked.connect(self._toggle_message_filter)
         self.message_filter_btn.adjustSize()
+
+        # Record counter - floating label centered in the single gap between
+        # the "ID" column and the FILTER link (mirrors the StatRep table's
+        # counter). Text is updated in _populate_table() to track the
+        # current filter; position tracked in _reposition_message_filter_btn().
+        self.message_count_label = QtWidgets.QLabel("0 Messages", self.message_table)
+        self.message_count_label.setStyleSheet(
+            "QLabel { background: transparent; color: %s;"
+            " font-family: Roboto; font-size: 13px; font-weight: bold; }" % title_fg
+        )
+        self.message_count_label.adjustSize()
+
         self.message_table.installEventFilter(self)
         # The vertical scrollbar's own show/hide (as rows load) doesn't fire
         # a table Resize event, so the button's sb_w-dependent x would go
@@ -6673,12 +6724,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self._populate_table(self.message_table, data)
-
-        count = len(data)
-        label = "Message" if count == 1 else "Messages"
-        self.message_table.setHorizontalHeaderItem(
-            6, QTableWidgetItem(f"{count} {label}")
-        )
 
         # _populate_table() rebuilds every row from scratch, so the filter
         # row (and its QLineEdit widgets) has to be re-inserted after each
@@ -7154,26 +7199,22 @@ class MainWindow(QtWidgets.QMainWindow):
             control=False
         ).add_to(m)
 
-        # Add online tile layer (ESRI Dark Gray Canvas) for zoom > 8, only if internet available
-        #
-        # 2026-08-28: swapped from CartoDB Dark Matter to Esri Dark Gray Canvas.
-        # To bring the old dark map back:
-        #   1. Below, replace the dark-branch URL with
-        #      'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-        #      and name='CartoDB Dark Matter' / attr back to CartoDB's.
-        #   2. Remove the tile_darken_css block further down (search
-        #      "leaflet-tile-pane img") — that contrast/brightness filter was
-        #      added to darken Esri's tiles and isn't needed for CartoDB.
-        #   3. Optional: the offline dark-tile cache (tilesPNG2Dark/, the
-        #      'tilesdark://' scheme registration, and download_dark_tiles.py)
-        #      was baked from Esri tiles. It can stay in place (unused) or be
-        #      removed; the local TileLayer above falls back to 'tiles://'
-        #      (light cache) if you delete the dark branch.
+        # Add online tile layer (CartoDB Dark Matter) for zoom > 8, only if internet available.
+        # CARTO's raster tile service now requires an API key (unauthenticated
+        # requests get served a watermarked "API KEY REQUIRED" tile instead of
+        # an error). The key is never hardcoded/committed — it's delivered
+        # on-demand via a Tools > Maintenance code (see maintenance.py) and
+        # written to config.ini's carto_api_key, same trusted-push channel
+        # Watchlist Presets uses for db_update payloads.
+        carto_key = self.config.get_carto_api_key()
+        carto_url = 'https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png'
+        if carto_key:
+            carto_url += f'?key={carto_key}'
         if self._internet_available:
             folium.raster_layers.TileLayer(
-                tiles=('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' if self.config.get_map_theme() == 'dark' else 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
-                name='ESRI Dark Gray Canvas',
-                attr='Esri, HERE, Garmin, © OpenStreetMap contributors, GIS community',
+                tiles=(carto_url if self.config.get_map_theme() == 'dark' else 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
+                name='CartoDB Dark Matter',
+                attr='CartoDB, © OpenStreetMap contributors',
                 min_zoom=1,
                 control=False
             ).add_to(m)
@@ -7454,37 +7495,6 @@ class MainWindow(QtWidgets.QMainWindow):
             map_html = map_html.replace("</head>", popup_css + "</head>", 1)
         except Exception:
             pass
-
-        # Esri's Dark Gray Canvas (and its baked-offline mirror) render state/
-        # country border lines as raster pixels only a handful of RGB levels
-        # off from the fill — there's no vector layer to restyle, so the only
-        # lever is a CSS filter on the tile images themselves. contrast<100%
-        # pulls light and dark pixels closer together (shrinking the
-        # border-vs-fill gap), then brightness<100% pushes the whole result
-        # back down to a dark absolute level. How bold Esri renders the lines
-        # varies by zoom, which made this fiddly to eyeball-tune from
-        # screenshots: contrast(70%) brightness(80%) read as no change at
-        # all, contrast(60%) brightness(75%) read as "very faint", and
-        # contrast(40%) brightness(60%) erased the lines outright — all at
-        # zoom 6. Settled it by measuring actual line-vs-fill pixel contrast
-        # at the same coordinates across variants instead of guessing further:
-        # baseline ~5.3, the "very faint" complaint was a 52% reduction
-        # (~2.6), "gone" was 74% (~1.4). This value lands at a 29% reduction
-        # (~3.8) — meaningfully darker without crossing into faint. Scoped to
-        # .leaflet-tile-pane so it only touches the base map (weather
-        # radar/pins live in their own custom panes).
-        if self.config.get_map_theme() == "dark":
-            tile_darken_css = """
-<style>
-.leaflet-tile-pane img {
-  filter: contrast(88%) brightness(88%);
-}
-</style>
-"""
-            try:
-                map_html = map_html.replace("</head>", tile_darken_css + "</head>", 1)
-            except Exception:
-                pass
 
         bounce_css = """
 <style>
@@ -9212,9 +9222,10 @@ window.commstatBouncePin = function(srid) {
         if is_message_table:
             count = table.rowCount()
             label = "1 Message" if count == 1 else f"{count} Messages"
-            header_item = table.horizontalHeaderItem(6)
-            if header_item is not None:
-                header_item.setText(label)
+            if hasattr(self, 'message_count_label'):
+                self.message_count_label.setText(label)
+                self.message_count_label.adjustSize()
+                self._reposition_message_filter_btn()
 
     def _get_normalization_settings(self) -> Tuple[bool, Optional[Dict[str, str]]]:
         """Get text normalization flag and abbreviations dict.

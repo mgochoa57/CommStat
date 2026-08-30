@@ -3152,3 +3152,54 @@ class MessageExpiredDialog(DeliveryConfirmationDialog):
     _BANNER_TEXT      = "This Message Was Not Delivered"
     _FOOTER_TEXT      = "Recipient Did Not Retrieve It"
     _FOOTER_AS_BANNER = True
+
+
+# ── Dialog: New Message notification popup ─────────────────────────────────
+
+class NewMessagePopupDialog(QDialog):
+    """Notification popup shown when a message arrives addressed to one of
+    our own callsigns. Sized to the 00-message.png background image, with
+    a banner reading "{CALLSIGN} Sent You a Message" across the middle."""
+
+    _BG_IMAGE = "00-message.png"
+    _FALLBACK_SIZE = (460, 190)
+
+    def __init__(self, callsign: str, parent=None):
+        super().__init__(parent)
+        apply_standard_dialog_chrome(self, "New Message")
+        self.setModal(True)
+        self._callsign = (callsign or "").strip().upper()
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        bg_pixmap = QPixmap(self._BG_IMAGE)
+        if bg_pixmap.isNull():
+            w, h = self._FALLBACK_SIZE
+        else:
+            w, h = bg_pixmap.width(), bg_pixmap.height()
+        self.setFixedSize(w, h)
+
+        bg_label = QLabel(self)
+        bg_label.setGeometry(0, 0, w, h)
+        bg_label.setStyleSheet("QLabel { background: transparent; border: none; }")
+        if not bg_pixmap.isNull():
+            bg_label.setPixmap(bg_pixmap)
+        bg_label.setScaledContents(True)
+
+        banner_h = 50
+        banner = QLabel(f"{self._callsign} Sent You a Message", self)
+        banner.setAlignment(Qt.AlignCenter)
+        banner.setFont(QFont("Roboto Slab", -1, QFont.Black))
+        banner.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 170); color: #FFFFFF;"
+            " font-size: 18px; }"
+        )
+        banner.setGeometry(0, (h - banner_h) // 2, w, banner_h)
+        banner.raise_()
+
+        self.btn_close = _btn("Close", _COL_CANCEL)
+        self.btn_close.setParent(self)
+        self.btn_close.clicked.connect(self.accept)
+        self.btn_close.adjustSize()
+        self.btn_close.move(w - self.btn_close.width() - 12, h - self.btn_close.height() - 12)
+        self.btn_close.raise_()

@@ -6,10 +6,17 @@ maintenance.py - Maintenance Dialog
 
 Lets support staff enter a short code given to a user who needs special
 attention. The code is sent to the commsrvr maintenance endpoint, which
-replies with either "0" (invalid code) or one or more SQL statements to
-run against the local database. This is a manually-triggered variant of
-the same trusted server-push channel the heartbeat's db_update uses
-(see little_gucci.py:_handle_db_update).
+replies with "0" (invalid code) and otherwise one of two payload shapes:
+  - One or more `;`-separated SQL statements, run against the local database
+    (the original behavior — a manually-triggered variant of the same
+    trusted server-push channel the heartbeat's db_update uses; see
+    little_gucci.py:_handle_db_update).
+  - A `CONFIG::key=value;key2=value2` payload, applied to the running
+    ConfigManager (and persisted to config.ini) via `config.set_<key>()` —
+    used to deliver values that shouldn't be hardcoded/committed in the repo,
+    e.g. the CARTO map tile API key. Only keys with an existing `set_<key>`
+    method on ConfigManager are ever applied; anything else is silently
+    ignored, so the server can't push arbitrary config.
 """
 
 import sqlite3
@@ -34,9 +41,14 @@ _BOX_BG = QtGui.QColor(_PANEL_BG).lighter(110).name()
 _MAINTENANCE_URL = _COMMSRVR + "/maintenance-808585.php"
 
 _WIN_W = 720
-_WIN_H = 460
+_WIN_H = 540
 
 _PRESET_CODES = [
+    ("GY9875",
+     "Fetches the map tile API key from the <b>CommStat</b> server and saves "
+     "it locally, so the Dark Map basemap renders without the "
+     "\"API key required\" watermark.<br><br>"
+     "Safe to run more than once — re-running it just refreshes the saved key."),
     ("AA3815",
      "If you <b>DO NOT</b> have a <b>QRZ subscription</b>, running this code "
      "will trigger an update from the <b>CommStat</b> server and refresh all "
@@ -54,8 +66,13 @@ _PRESET_CODES = [
 
 
 class _MaintenanceWorker(QThread):
-    """Sends the code to the maintenance endpoint and applies any returned SQL."""
-    result_ready = pyqtSignal(str, str)  # (status, message) — status in {"success","invalid","error"}
+    """Sends the code to the maintenance endpoint and applies whatever it returns.
+
+    config_updates is always emitted (empty dict on the SQL path) so the
+    slot only ever has one place to look for config values to apply — see
+    MaintenanceDialog._on_worker_result.
+    """
+    result_ready = pyqtSignal(str, str, dict)  # (status, message, config_updates) — status in {"success","invalid","error"}
 
     def __init__(self, code: str):
         super().__init__()
@@ -64,7 +81,7 @@ class _MaintenanceWorker(QThread):
     def run(self) -> None:
         import netguard
         if not netguard.guard("Maintenance code check"):
-            self.result_ready.emit("error", "Off-Grid Mode is enabled — switch back to ONLINE to run this.")
+            self.result_ready.emit("error", "Off-Grid Mode is enabled — switch back to ONLINE to run this.", {})
             return
 
         try:
@@ -72,16 +89,29 @@ class _MaintenanceWorker(QThread):
             with urllib.request.urlopen(url, timeout=10, context=create_verified_ssl_context()) as resp:
                 content = resp.read().decode("utf-8").strip()
         except Exception as e:
-            self.result_ready.emit("error", f"Could not reach the server: {e}")
+            self.result_ready.emit("error", f"Could not reach the server: {e}", {})
             return
 
         if content == "0" or not content:
-            self.result_ready.emit("invalid", "Code is invalid.")
+            self.result_ready.emit("invalid", "Code is invalid.", {})
+            return
+
+        if content.startswith("CONFIG::"):
+            pairs = [p.strip() for p in content[len("CONFIG::"):].split(";") if p.strip()]
+            config_updates = dict(p.split("=", 1) for p in pairs if "=" in p)
+            if not config_updates:
+                self.result_ready.emit("invalid", "Code is invalid.", {})
+                return
+            self.result_ready.emit(
+                "success",
+                "The update was applied successfully. Restart CommStat to apply the changes.",
+                config_updates,
+            )
             return
 
         statements = [s.strip() for s in content.split(";") if s.strip()]
         if not statements:
-            self.result_ready.emit("invalid", "Code is invalid.")
+            self.result_ready.emit("invalid", "Code is invalid.", {})
             return
 
         try:
@@ -91,10 +121,10 @@ class _MaintenanceWorker(QThread):
                     cursor.execute(sql)
                 conn.commit()
         except sqlite3.Error as e:
-            self.result_ready.emit("error", f"Update failed: {e}")
+            self.result_ready.emit("error", f"Update failed: {e}", {})
             return
 
-        self.result_ready.emit("success", "The update was applied successfully.")
+        self.result_ready.emit("success", "The update was applied successfully.", {})
 
 
 class MaintenanceDialog(QDialog):
@@ -199,8 +229,16 @@ class MaintenanceDialog(QDialog):
         self._worker.result_ready.connect(self._on_worker_result)
         self._worker.start()
 
-    def _on_worker_result(self, status: str, message: str) -> None:
+    def _on_worker_result(self, status: str, message: str, config_updates: dict) -> None:
         self.code_edit.setEnabled(True)
         self.btn_run.setEnabled(True)
         self.lbl_status.setText("")
-        show_help_dialog(self, "Maintenance", message, width=360, height=160)
+
+        if config_updates:
+            config = getattr(self.parent(), "config", None)
+            for key, value in config_updates.items():
+                setter = getattr(config, f"set_{key}", None) if config else None
+                if setter:
+                    setter(value)
+
+        show_help_dialog(self, "Maintenance", message, width=360, height=220)
