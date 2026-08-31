@@ -2857,9 +2857,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sound_debounce_timer.setSingleShot(True)
         self._sound_debounce_timer.timeout.connect(self._play_pending_sound)
 
-        # Internet connectivity state
+        # Internet connectivity state. Probed in the background once the
+        # window is visible (see _load_initial_data/_start_internet_check)
+        # — the previous synchronous check here blocked the window from
+        # appearing for up to 3s on a slow-DNS day.
         self._internet_available = False
-        self._check_internet_on_startup()
 
         # Initialize JS8Call connector manager and TCP connection pool
         self.connector_manager = ConnectorManager()
@@ -2870,10 +2872,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcp_pool.any_status_message.connect(self._handle_status_message)
         self.tcp_pool.any_callsign_received.connect(self._handle_callsign_received)
         self.tcp_pool.any_grid_received.connect(self._handle_grid_received)
-
-        # Live-bold StatRep/Message rows when a QRZ API lookup writes to the qrz table
-        from qrz_lookup import qrz_cache_notifier
-        qrz_cache_notifier.record_written.connect(self._on_qrz_record_written)
 
         # Store station info by rig name (persists even if connection is lost)
         self.rig_callsigns: Dict[str, str] = {}
@@ -3105,7 +3103,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._populate_filter_groups_menu()
         self._populate_watchlist_pins_menu()
 
-        # Load initial data
+        # Load initial data once the window is actually visible (see
+        # _load_initial_data) instead of blocking __init__/show() on the
+        # connectivity probe, DB queries, and full map render.
+        QTimer.singleShot(0, self._load_initial_data)
+
+    def _load_initial_data(self) -> None:
+        """Run once the window is visible and the event loop has started:
+        kick off the background connectivity probe, wire the QRZ cache
+        notifier, and load StatRep/map/live-feed/message data.
+
+        Deferred out of __init__ via the QTimer.singleShot(0, ...) at the
+        end of _setup_ui() so the window shell appears immediately instead
+        of waiting on a blocking socket probe and several DB queries plus a
+        full folium map render.
+        """
+        self._start_internet_check()
+
+        # Live-bold StatRep/Message rows when a QRZ API lookup writes to the
+        # qrz table. Deferred here (unlike every other lazy dialog import,
+        # which goes through _resolve_dialog_class on first use) only
+        # because nothing needs it before the window is shown.
+        from qrz_lookup import qrz_cache_notifier
+        qrz_cache_notifier.record_written.connect(self._on_qrz_record_written)
+
         self._load_statrep_data()
         self._load_map()
         self._load_live_feed()
@@ -3146,11 +3167,50 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Commsrvr check will start automatically after 30 seconds via timer
 
-    def _check_internet_on_startup(self) -> None:
-        """Check internet connectivity at startup."""
-        self._internet_available = check_internet()
-        if self._internet_available:
+    def _start_internet_check(self) -> None:
+        """Probe connectivity on a background thread so the up-to-3s worst
+        case (see check_internet()'s own comment) never blocks the UI
+        thread. Polls for completion via QTimer rather than a cross-thread
+        signal, matching the pattern already used for the image-fetch
+        dialog and _check_commsrvr_content_async — safe because the poll
+        timer itself is always scheduled from the main thread.
+
+        Called from _load_initial_data(), after _setup_ui() has already
+        built the timers/menu actions _on_internet_check_complete() may
+        need to touch on a False->True transition.
+        """
+        result: Dict[str, bool] = {}
+
+        def worker() -> None:
+            result['available'] = check_internet()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll() -> None:
+            if 'available' in result:
+                self._on_internet_check_complete(result['available'])
+            else:
+                QTimer.singleShot(100, poll)
+
+        QTimer.singleShot(100, poll)
+
+    def _on_internet_check_complete(self, is_available: bool) -> None:
+        """Handle the startup connectivity probe's result."""
+        self._internet_available = is_available
+        if is_available:
             print("Internet connectivity: Available")
+            if hasattr(self, 'internet_timer'):
+                self.internet_timer.stop()
+            self._on_internet_became_available()
+            # _load_map() may already have rendered offline-only if it ran
+            # before this background probe resolved — refresh it once so
+            # the online tile layer (and any enabled overlays) picks up
+            # now that connectivity is confirmed. Unconditional here
+            # (unlike _retry_internet_check's map refresh) because this
+            # race is the common case at startup, not a rare
+            # comes-back-online-30-minutes-later edge case.
+            if self.map_loaded:
+                self._save_map_position(callback=self._load_map)
         else:
             print("Internet connectivity: Not available (will retry in 30 minutes)")
 
@@ -3315,6 +3375,28 @@ class MainWindow(QtWidgets.QMainWindow):
         # stay quiescent until the user clicks Reconnect.
         self.tcp_pool.connect_all()
 
+    def _on_internet_became_available(self) -> None:
+        """Restart everything gated on connectivity once it's confirmed
+        available. Shared by the startup probe
+        (_on_internet_check_complete) and the periodic 30-minute retry
+        (_retry_internet_check) below.
+
+        Re-enables the internet-gated map overlay menu items, which were
+        disabled at startup/menu-build time because there was no connection
+        yet — without this they stay grayed out for the rest of the session
+        even after connectivity returns.
+        """
+        # Send first heartbeat after the HEARTBEAT_DELAY_MS delay, then start timer
+        def start_commsrvr_heartbeat():
+            self._check_commsrvr()  # Send first heartbeat immediately
+            self.commsrvr_timer.start(HEARTBEAT_INTERVAL_MS)
+        QTimer.singleShot(HEARTBEAT_DELAY_MS, start_commsrvr_heartbeat)
+
+        self._sync_weather_radar_action()
+        self._sync_earthquake_action()
+        self._sync_wildfire_action()
+        self._restart_radar_refresh_timer()
+
     def _retry_internet_check(self) -> None:
         """Retry internet connectivity check (called by timer)."""
         was_available = self._internet_available
@@ -3324,20 +3406,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Internet just became available
             print("Internet connectivity: Now available")
             self.internet_timer.stop()
-            # Send first heartbeat after the HEARTBEAT_DELAY_MS delay, then start timer
-            def start_commsrvr_heartbeat():
-                self._check_commsrvr()  # Send first heartbeat immediately
-                self.commsrvr_timer.start(HEARTBEAT_INTERVAL_MS)
-            QTimer.singleShot(HEARTBEAT_DELAY_MS, start_commsrvr_heartbeat)
-
-            # Re-enable the internet-gated map overlay menu items, which were
-            # disabled at startup/menu-build time because there was no
-            # connection yet — without this they stay grayed out for the
-            # rest of the session even after connectivity returns.
-            self._sync_weather_radar_action()
-            self._sync_earthquake_action()
-            self._sync_wildfire_action()
-            self._restart_radar_refresh_timer()
+            self._on_internet_became_available()
             if self.config.get_weather_radar() or self.config.get_earthquake_layer() or self.config.get_wildfire_layer():
                 self._save_map_position(callback=self._load_map)
         elif not self._internet_available:
@@ -6869,14 +6938,45 @@ class MainWindow(QtWidgets.QMainWindow):
             return "#2f7bff"   # blue
         return "#00e5ff"       # cyan
 
+    def _ensure_earthquake_data_async(self) -> None:
+        """Kick a background fetch of USGS earthquake data (if one isn't
+        already running) so _add_earthquakes_to_map() never blocks the UI
+        thread on the up-to-8s USGS call. The current render uses whatever
+        is already cached (possibly nothing, the first time); once the
+        fetch actually lands fresh data, the map reloads itself once.
+        _fetch_earthquake_events() already skips the network call and
+        returns instantly when its own cache is still fresh, so calling
+        this on every map render is cheap."""
+        if getattr(self, "_earthquake_fetch_in_progress", False):
+            return
+        self._earthquake_fetch_in_progress = True
+        cache_time_before = getattr(self, "_earthquake_cache_time", 0)
+
+        def worker() -> None:
+            self._fetch_earthquake_events()
+            self._earthquake_fetch_in_progress = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll() -> None:
+            if self._earthquake_fetch_in_progress:
+                QTimer.singleShot(200, poll)
+            elif self.map_loaded and getattr(self, "_earthquake_cache_time", 0) != cache_time_before:
+                self._save_map_position(callback=self._load_map)
+
+        QTimer.singleShot(200, poll)
+
     def _add_earthquakes_to_map(self, m) -> None:
         """Add optional USGS earthquake markers to the folium map."""
         try:
             if not (hasattr(self.config, "get_earthquake_layer") and self.config.get_earthquake_layer()):
                 return
 
+            if getattr(self, "_internet_available", False):
+                self._ensure_earthquake_data_async()
+
             fg = folium.FeatureGroup(name="USGS Earthquakes", overlay=True, control=True, show=True)
-            for eq in self._fetch_earthquake_events():
+            for eq in getattr(self, "_earthquake_cache", []):
                 mag = eq["mag"]
                 color = self._earthquake_color(mag)
                 radius = max(5, min(18, 4 + mag * 1.8))
@@ -7013,14 +7113,39 @@ class MainWindow(QtWidgets.QMainWindow):
         '''
         return folium.DivIcon(html=html, icon_size=(18, 18), icon_anchor=(9, 15))
 
+    def _ensure_wildfire_data_async(self) -> None:
+        """Background-fetch NIFC wildfire data, mirroring
+        _ensure_earthquake_data_async() — see its docstring."""
+        if getattr(self, "_wildfire_fetch_in_progress", False):
+            return
+        self._wildfire_fetch_in_progress = True
+        cache_time_before = getattr(self, "_wildfire_cache_time", 0)
+
+        def worker() -> None:
+            self._fetch_wildfire_events()
+            self._wildfire_fetch_in_progress = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll() -> None:
+            if self._wildfire_fetch_in_progress:
+                QTimer.singleShot(200, poll)
+            elif self.map_loaded and getattr(self, "_wildfire_cache_time", 0) != cache_time_before:
+                self._save_map_position(callback=self._load_map)
+
+        QTimer.singleShot(200, poll)
+
     def _add_wildfires_to_map(self, m) -> None:
         """Add optional NIFC wildfire incident markers to the folium map."""
         try:
             if not (hasattr(self.config, "get_wildfire_layer") and self.config.get_wildfire_layer()):
                 return
 
+            if getattr(self, "_internet_available", False):
+                self._ensure_wildfire_data_async()
+
             fg = folium.FeatureGroup(name="Wildfires (NIFC)", overlay=True, control=True, show=True)
-            for fire in self._fetch_wildfire_events():
+            for fire in getattr(self, "_wildfire_cache", []):
                 acres = fire["acres"]
                 color = self._wildfire_color(acres)
                 t = fire.get("discovered")
