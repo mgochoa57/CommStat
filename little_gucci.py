@@ -2526,6 +2526,31 @@ class DatabaseManager:
                 return False
         return self._execute(op, False)
 
+    def get_notify_enabled(self) -> bool:
+        """Get whether the new-message popup is enabled; defaults to True."""
+        def op(cursor, conn):
+            try:
+                cursor.execute("SELECT mssgNotify FROM controls WHERE id = 1")
+                row = cursor.fetchone()
+                return bool(row[0]) if row and row[0] is not None else True
+            except sqlite3.OperationalError:
+                return True
+        return self._execute(op, True)
+
+    def set_notify_enabled(self, enabled: bool) -> bool:
+        """Save whether the new-message popup is enabled."""
+        def op(cursor, conn):
+            try:
+                cursor.execute(
+                    "UPDATE controls SET mssgNotify = ? WHERE id = 1",
+                    (1 if enabled else 0,)
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.OperationalError:
+                return False
+        return self._execute(op, False)
+
     def get_map_filters(self) -> List[Tuple[str, str, str, str, str, str]]:
         """All saved Custom Filtering criteria sets, ordered by name.
 
@@ -6163,7 +6188,10 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(str)
     def _show_new_message_popup(self, callsign: str) -> None:
         """Show a notification popup when a message arrives addressed to
-        one of our own callsigns."""
+        one of our own callsigns, unless the user has disabled it in
+        User Settings (controls.mssgNotify)."""
+        if not self.db.get_notify_enabled():
+            return
         from qrz_lookup import NewMessagePopupDialog
         dlg = NewMessagePopupDialog(callsign=callsign, parent=self)
         dlg.exec_()
@@ -9254,12 +9282,12 @@ window.commstatBouncePin = function(srid) {
 
                 item = QTableWidgetItem(display_value)
 
-                # Use Kode Mono for remarks/message text columns, StatRep's
-                # From/ID/Grid columns, and the Messages table's From/ID columns.
-                # Freq (both tables) stays Roboto.
-                if (is_statrep_table and col_num in (3, 5, 6, 20)) or (is_message_table and col_num in (3, 5, 6)):
+                # Use Kode Mono for remarks/message text columns and StatRep's
+                # Grid column. Freq (both tables) and both tables' From/ID
+                # columns use Roboto.
+                if (is_statrep_table and col_num in (6, 20)) or (is_message_table and col_num == 6):
                     item.setFont(QtGui.QFont("Kode Mono", -1))
-                elif (is_statrep_table or is_message_table) and col_num == 2:
+                elif (is_statrep_table or is_message_table) and col_num in (2, 3, 5):
                     item.setFont(QtGui.QFont("Roboto", -1))
 
                 # Add tooltip for multi-line remarks
