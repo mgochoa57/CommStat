@@ -149,7 +149,7 @@ class UserSettingsDialog(QDialog):
         desc_lbl.setWordWrap(True)
         desc_lbl.setAlignment(Qt.AlignCenter)
         desc_lbl.setStyleSheet(
-            f"QLabel {{ font-family:Roboto; font-size:13px; color:#555555; }}"
+            f"QLabel {{ font-family:Roboto; font-size:13px; color:#000000; }}"
         )
         body.addWidget(desc_lbl)
 
