@@ -2976,6 +2976,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # across launches. Once windowHandle().frameMargins() is populated,
         # re-move with the margins subtracted so the saved/restored position is
         # a stable fixed point.
+        #
+        # frameMargins() isn't populated until after the window is shown, so
+        # the compensating move necessarily happens post-show — stay invisible
+        # until it lands (or gives up) instead of visibly jumping into place.
+        self.setWindowOpacity(0.0)
+
         target_x, target_y = x, y
         state = {"attempts": 0, "applied": False}
 
@@ -2987,12 +2993,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if margins is None or not (margins.left() or margins.top()):
                 if state["attempts"] < 30:
                     QTimer.singleShot(100, _compensate)
+                else:
+                    self.setWindowOpacity(1.0)
                 return
 
             if state["applied"]:
                 return
             state["applied"] = True
             self.move(target_x - margins.left(), target_y - margins.top())
+            self.setWindowOpacity(1.0)
 
         QTimer.singleShot(150, _compensate)
 
@@ -4694,7 +4703,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # and hover behavior as the video player and Alerts nav buttons.
         _NAV_BTN_QSS = (
             "QPushButton { background-color: rgba(0,0,0,0.65); color: white;"
-            " font-family: sans-serif; font-size: 13px; border: 1px solid #999;"
+            " font-family: Roboto; font-size: 13px; border: 1px solid #999;"
             " border-radius: 4px; padding: 4px 12px; }"
             "QPushButton:hover { background-color: rgba(40,167,69,0.85); }"
         )
@@ -4791,7 +4800,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # auto-sized to content like their HTML/CSS counterparts, not fixed.
         _NAV_BTN_QSS = (
             "QPushButton { background-color: rgba(0,0,0,0.65); color: white;"
-            " font-family: sans-serif; font-size: 13px; border: 1px solid #999;"
+            " font-family: Roboto; font-size: 13px; border: 1px solid #999;"
             " border-radius: 4px; padding: 4px 12px; }"
             "QPushButton:hover { background-color: rgba(40,167,69,0.85); }"
         )
@@ -7313,11 +7322,9 @@ class MainWindow(QtWidgets.QMainWindow):
         folium.map.CustomPane("weatherPane", z_index=380, pointer_events=False).add_to(m)
         folium.map.CustomPane("statrepPane", z_index=390, pointer_events=True).add_to(m)
 
-        # Add local (offline) tile layer — separate light/dark caches so the
-        # offline fallback matches the online map's theme (see tilesPNG2Dark/
-        # and download_dark_tiles.py for how the dark cache was baked).
+        # Add local (offline) tile layer.
         folium.raster_layers.TileLayer(
-            tiles=('tilesdark://local/{z}/{x}/{y}.png' if self.config.get_map_theme() == 'dark' else 'tiles://local/{z}/{x}/{y}.png'),
+            tiles='tiles://local/{z}/{x}/{y}.png',
             name='Local Tiles',
             attr='Local Tiles',
             max_zoom=8,
@@ -9983,6 +9990,7 @@ window.commstatBouncePin = function(srid) {
         Parse a Group Event message and save it as an Event-flavored StatRep row.
 
         Format: ,GRID,6,ID,PIN,MESSAGE,{##}
+        Forwarded: ,GRID,6,ID,PIN,MESSAGE,{F#}
         See group_event.py — the scope slot is always literal "6" (not a
         geographic scope code), and the normal 12-digit condition string is
         replaced by a single Pin-to-Map digit ("1"/"0"). An Event row is
@@ -10005,7 +10013,10 @@ window.commstatBouncePin = function(srid) {
         """
         import re
 
-        match = re.search(r',(.+?)\{##\}', message_value)
+        is_forwarded = "{F#}" in message_value
+        marker = "{F#}" if is_forwarded else "{##}"
+
+        match = re.search(r',(.+?)' + re.escape(marker), message_value)
         if not match:
             return ("", None)
 
@@ -10063,8 +10074,9 @@ window.commstatBouncePin = function(srid) {
             'global_id': global_id
         }
 
+        fwd_marker = " (FORWARDED)" if is_forwarded else ""
         result = self._insert_message_data(
-            rig_name, "statrep", data, "sr_id", "statrep", from_callsign
+            rig_name, "statrep", data, "sr_id", "statrep", from_callsign, fwd_marker
         )
         if result:
             return (result, None)
@@ -10586,7 +10598,7 @@ window.commstatBouncePin = function(srid) {
 
         Processes messages in priority order:
         1. Standard STATREP ({&%} or {F%})
-        2. Group Event ({##})
+        2. Group Event ({##} or {F#})
         3. F!304 STATREP (8-digit format)
         4. F!301 STATREP (9-digit format)
         5. ALERT ({%%})
@@ -10633,8 +10645,8 @@ window.commstatBouncePin = function(srid) {
                 rig_name, message_value, from_callsign, target, grid, freq, snr, utc, source, global_id
             )
 
-        # PRIORITY 2: Group Event ({##})
-        if "{##}" in message_value:
+        # PRIORITY 2: Group Event ({##} or {F#})
+        if "{##}" in message_value or "{F#}" in message_value:
             return self._parse_group_event(
                 rig_name, message_value, from_callsign, target, grid, freq, snr, utc, source, global_id
             )
@@ -10927,26 +10939,22 @@ def main() -> None:
         except Exception as e:
             print(f"Warning: Could not replace launcher: {e}")
 
-    # Register tiles:// and tilesdark:// schemes before QApplication (Qt requirement)
-    for _scheme_name in (b'tiles', b'tilesdark'):
-        _tile_scheme = QWebEngineUrlScheme(_scheme_name)
-        _tile_scheme.setFlags(
-            QWebEngineUrlScheme.SecureScheme |
-            QWebEngineUrlScheme.LocalScheme |
-            QWebEngineUrlScheme.CorsEnabled
-        )
-        QWebEngineUrlScheme.registerScheme(_tile_scheme)
+    # Register tiles:// scheme before QApplication (Qt requirement)
+    _tile_scheme = QWebEngineUrlScheme(b'tiles')
+    _tile_scheme.setFlags(
+        QWebEngineUrlScheme.SecureScheme |
+        QWebEngineUrlScheme.LocalScheme |
+        QWebEngineUrlScheme.CorsEnabled
+    )
+    QWebEngineUrlScheme.registerScheme(_tile_scheme)
 
     QtWidgets.QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
 
-    # Install tile scheme handlers on the default profile (light + dark
-    # offline caches; see _load_map for the theme-based selection)
+    # Install tile scheme handler on the default profile
     _tile_handler = TileSchemeHandler("tilesPNG2")
     QWebEngineProfile.defaultProfile().installUrlSchemeHandler(b'tiles', _tile_handler)
-    _tile_handler_dark = TileSchemeHandler("tilesPNG2Dark")
-    QWebEngineProfile.defaultProfile().installUrlSchemeHandler(b'tilesdark', _tile_handler_dark)
 
     # Allow media autoplay in web views (video playback starts without an
     # in-page click; play is triggered from the app UI instead)

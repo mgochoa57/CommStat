@@ -353,7 +353,7 @@ class QRZSettingsDialog(QDialog):
             password = db_pass or ""
             enabled  = bool(db_active)
 
-        self._iw_username = make_input(placeholder="Your QRZ.com callsign", max_len=20)
+        self._iw_username = make_input(placeholder="Your Callsign", max_len=20)
         self._iw_username.setText(username)
         self._iw_username.textChanged.connect(
             lambda t: self._iw_username.setText(t.upper()) if t != t.upper() else None

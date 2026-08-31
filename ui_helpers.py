@@ -257,8 +257,8 @@ def apply_standard_dialog_chrome(dialog, title: str, w: int = 0, h: int = 0) -> 
 # program colors, an HTML body, and a Close button. Feature modules supply only
 # the body — the scaffolding lives here so all five popups stay identical and
 # nobody re-implements the chrome.
-_HELP_BODY_CSS = """
-QTextBrowser { background-color: #FFFFFF; border: 1px solid #C8C8C8; padding: 10px; }
+_HELP_BODY_CSS = f"""
+QTextBrowser {{ background-color: #FFFFFF; color: {COLOR_INPUT_TEXT}; border: 1px solid #C8C8C8; padding: 10px; }}
 """
 
 

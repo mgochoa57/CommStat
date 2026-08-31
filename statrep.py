@@ -133,6 +133,7 @@ _HELP_HTML = f"""
 WINDOW_WIDTH = 700
 WINDOW_HEIGHT = 510
 WINDOW_HEIGHT_EXPANDED = 650
+WINDOW_HEIGHT_FORWARD = WINDOW_HEIGHT_EXPANDED - 180  # Shorter: no editable status grid to fit
 INTERNET_RIG = "INTERNET ONLY"
 REMARKS_MAX_RADIO = 500
 REMARKS_MAX_INTERNET = 500
@@ -800,7 +801,9 @@ class StatRepDialog(QDialog):
                 )
             status_grid.addWidget(combo, combo_row, col)
 
-        layout.addLayout(status_grid)
+        self.status_grid_widget = QtWidgets.QWidget()
+        self.status_grid_widget.setLayout(status_grid)
+        layout.addWidget(self.status_grid_widget)
 
         # Remarks
         remarks_label = QtWidgets.QLabel("Remarks:")
@@ -815,7 +818,7 @@ class StatRepDialog(QDialog):
 
         self.remarks_expanded = QtWidgets.QPlainTextEdit()
         self.remarks_expanded.setFont(mono_font())
-        self.remarks_expanded.setMinimumHeight(120)
+        self.remarks_expanded.setFixedHeight(160)
         self.remarks_expanded.setPlaceholderText(
             f"Optional - max {REMARKS_MAX_INTERNET} characters, multiple lines allowed"
         )
@@ -908,6 +911,7 @@ class StatRepDialog(QDialog):
             )
         else:
             combo.setStyleSheet("")
+
 
     def _on_help_clicked(self, _link: str = "") -> None:
         """Show a styled help dialog explaining Mode, Delivery, and Color selection."""
@@ -1055,6 +1059,7 @@ class StatRepDialog(QDialog):
                 self._forward_mode_label.show()
             if hasattr(self, 'btn_save'):
                 self.btn_save.setEnabled(False)
+            self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT_FORWARD)
             self._lock_for_forward_mode()
 
         # If a rig is already selected (e.g. Internet Only pre-selected at open),
@@ -1074,14 +1079,19 @@ class StatRepDialog(QDialog):
 
         Forwarding preserves the original report verbatim. The user may only
         change Rig, Mode, Delivery, and To (target). Everything else — From,
-        Grid, Scope, all 12 status combos, and remarks — is read-only.
+        Grid, Scope, all 12 statuses, and remarks — is read-only. The 12
+        status dropdowns are hidden outright (their values are still read
+        and transmitted from the background combos) so the dialog reads as a
+        report rather than an editable form, matching the Group Event
+        forward view. The dialog is also resized shorter (WINDOW_HEIGHT_FORWARD)
+        since there's no 12-dropdown grid left to fit.
         """
         if hasattr(self, 'grid_field'):
             self.grid_field.setReadOnly(True)
         if hasattr(self, 'scope_combo'):
             self.scope_combo.setEnabled(False)
-        for combo in self.status_combos.values():
-            combo.setEnabled(False)
+        if hasattr(self, 'status_grid_widget'):
+            self.status_grid_widget.hide()
         if hasattr(self, 'remarks_field'):
             self.remarks_field.setReadOnly(True)
         if hasattr(self, 'remarks_expanded'):

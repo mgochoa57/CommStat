@@ -27,7 +27,10 @@ from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 
-from constants import DEFAULT_COLORS, COLOR_BTN_GREEN, COLOR_BTN_CLOSE, DATABASE_FILE
+from constants import (
+    DEFAULT_COLORS, COLOR_BTN_GREEN, COLOR_BTN_CLOSE, DATABASE_FILE,
+    COLOR_BTN_BLUE, COLOR_INPUT_TEXT, COLOR_INPUT_BORDER, FONT_MONO_STACK,
+)
 from ui_helpers import apply_standard_dialog_chrome, make_button, connect_single, show_help_dialog
 from little_gucci import _COMMSRVR, create_verified_ssl_context, UpperCaseLineEdit
 
@@ -36,6 +39,7 @@ from little_gucci import _COMMSRVR, create_verified_ssl_context, UpperCaseLineEd
 _PROG_BG = DEFAULT_COLORS.get("program_background", "#A52A2A")
 _PROG_FG = DEFAULT_COLORS.get("program_foreground", "#FFFFFF")
 _PANEL_BG = DEFAULT_COLORS.get("module_background", "#DDDDDD")
+_PANEL_FG = DEFAULT_COLORS.get("module_foreground", "#000000")
 _BOX_BG = QtGui.QColor(_PANEL_BG).lighter(110).name()
 
 _MAINTENANCE_URL = _COMMSRVR + "/maintenance-808585.php"
@@ -154,13 +158,20 @@ class MaintenanceDialog(QDialog):
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
         lbl_code = QLabel("Code:")
-        lbl_code.setStyleSheet("QLabel { font-family:Roboto; font-size:12px; font-weight:bold; }")
+        lbl_code.setStyleSheet(
+            f"QLabel {{ font-family:Roboto; font-size:12px; font-weight:bold; color:{_PANEL_FG}; }}"
+        )
         input_row.addWidget(lbl_code)
 
         self.code_edit = UpperCaseLineEdit()
         self.code_edit.setMaxLength(6)
         self.code_edit.setMinimumHeight(30)
         self.code_edit.setFixedWidth(100)
+        self.code_edit.setStyleSheet(
+            f"QLineEdit {{ background-color:white; color:{COLOR_INPUT_TEXT}; border:1px solid {COLOR_INPUT_BORDER};"
+            f" border-radius:4px; padding:2px 6px; font-family:{FONT_MONO_STACK}; font-size:13px; }}"
+            f"QLineEdit:focus {{ border:1px solid {COLOR_BTN_BLUE}; }}"
+        )
         self.code_edit.returnPressed.connect(self._on_run)
         input_row.addWidget(self.code_edit)
 
@@ -175,12 +186,14 @@ class MaintenanceDialog(QDialog):
         layout.addLayout(input_row)
 
         self.lbl_status = QLabel("")
-        self.lbl_status.setStyleSheet("QLabel { font-family:Roboto; font-size:13px; }")
+        self.lbl_status.setStyleSheet(
+            f"QLabel {{ font-family:Roboto; font-size:13px; color:{_PANEL_FG}; }}"
+        )
         layout.addWidget(self.lbl_status)
 
         lbl_presets_heading = QLabel("Available Codes")
         lbl_presets_heading.setStyleSheet(
-            "QLabel { font-family:Roboto; font-size:13px; font-weight:bold; }"
+            f"QLabel {{ font-family:Roboto; font-size:13px; font-weight:bold; color:{_PANEL_FG}; }}"
         )
         layout.addWidget(lbl_presets_heading)
 
@@ -202,7 +215,7 @@ class MaintenanceDialog(QDialog):
 
         lbl_code = QLabel(code)
         lbl_code.setStyleSheet(
-            "QLabel { font-family:Roboto Mono; font-size:13px; font-weight:bold; border:none; }"
+            f"QLabel {{ font-family:Roboto Mono; font-size:13px; font-weight:bold; border:none; color:{_PANEL_FG}; }}"
         )
         row.addWidget(lbl_code)
 

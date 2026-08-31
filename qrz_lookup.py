@@ -1755,6 +1755,8 @@ class StatRepDetailDialog(QDialog):
         if not self._tcp_pool or not self._connector_manager or not self._row_data:
             return
 
+        is_event = self._row_data.get("scope") == "EVENT"
+
         if self._sr_datetime:
             try:
                 sr_dt_str = self._sr_datetime.replace(" UTC", "").strip()
@@ -1765,8 +1767,9 @@ class StatRepDetailDialog(QDialog):
                     from PyQt5.QtWidgets import QMessageBox
                     msg = QMessageBox(self)
                     msg.setWindowTitle("Cannot Forward")
+                    kind = "Event" if is_event else "Status Report"
                     msg.setText(
-                        "This Status Report cannot be forwarded because it is more than 24 hours old."
+                        f"This {kind} cannot be forwarded because it is more than 24 hours old."
                     )
                     msg.setIcon(QMessageBox.Warning)
                     msg.setStandardButtons(QMessageBox.Close)
@@ -1774,6 +1777,16 @@ class StatRepDetailDialog(QDialog):
                     return
             except (ValueError, TypeError):
                 pass
+
+        if is_event:
+            from group_event import GroupEventDialog
+            dlg = GroupEventDialog(
+                self._tcp_pool, self._connector_manager, self,
+                module_background=self._module_bg,
+            )
+            dlg.prefill({**self._row_data, "pinned": self.pin_toggle.isChecked()})
+            dlg.exec_()
+            return
 
         from statrep import StatRepDialog
         dlg = StatRepDialog(

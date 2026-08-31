@@ -86,7 +86,8 @@ magnitude, create a Status Report instead.</p>
 DATABASE_FILE = "traffic.db3"
 
 WINDOW_WIDTH = 700
-WINDOW_HEIGHT = 460
+WINDOW_HEIGHT = 510
+WINDOW_HEIGHT_FORWARD = 530  # Room for the "Forward Mode" banner above the buttons
 MESSAGE_MAX_RADIO = 500
 MESSAGE_MAX_INTERNET = 500
 NEWLINE_PLACEHOLDER = "||"
@@ -138,6 +139,8 @@ class GroupEventDialog(QDialog):
         self.selected_group = ""
         self.event_id = ""
         self._pending_frequency = 0
+        self._forwarder_callsign = ""       # Forwarder's callsign in forward mode
+        self._forward_original_message = "" # Original message before "Forwarded By:" is appended
 
         self._load_config()
         self._setup_ui()
@@ -255,12 +258,13 @@ class GroupEventDialog(QDialog):
     def _on_rig_changed(self, rig_name: str) -> None:
         """Handle rig selection change - fetch callsign from JS8Call."""
         if not rig_name or "(disconnected)" in rig_name:
-            self.callsign = ""
-            self.grid = ""
-            if hasattr(self, 'from_field'):
-                self.from_field.setText("")
-            if hasattr(self, 'grid_field'):
-                self.grid_field.setText("")
+            if not getattr(self, '_forward_origin', None):
+                self.callsign = ""
+                self.grid = ""
+                if hasattr(self, 'from_field'):
+                    self.from_field.setText("")
+                if hasattr(self, 'grid_field'):
+                    self.grid_field.setText("")
             if hasattr(self, 'freq_field'):
                 self.freq_field.setText("")
             return
@@ -278,9 +282,13 @@ class GroupEventDialog(QDialog):
             # Grid is intentionally left as whatever the operator has typed —
             # unlike StatRep, Group Event never auto-fills it from User Settings.
             callsign, _, _ = self._get_internet_user_settings()
-            self.callsign = callsign
-            if hasattr(self, 'from_field'):
-                self.from_field.setText(callsign)
+            if getattr(self, '_forward_origin', None):
+                self._forwarder_callsign = callsign
+                self._update_forward_message_field(callsign)
+            else:
+                self.callsign = callsign
+                if hasattr(self, 'from_field'):
+                    self.from_field.setText(callsign)
             if hasattr(self, 'freq_field'):
                 self.freq_field.setText("")
             if hasattr(self, 'mode_combo'):
@@ -371,9 +379,13 @@ class GroupEventDialog(QDialog):
 
     def _on_callsign_received(self, rig_name: str, callsign: str) -> None:
         if self.rig_combo.currentText() == rig_name:
-            self.callsign = callsign
-            if hasattr(self, 'from_field'):
-                self.from_field.setText(callsign)
+            if getattr(self, '_forward_origin', None):
+                self._forwarder_callsign = callsign
+                self._update_forward_message_field(callsign)
+            else:
+                self.callsign = callsign
+                if hasattr(self, 'from_field'):
+                    self.from_field.setText(callsign)
 
     def _on_frequency_received(self, rig_name: str, dial_freq: int) -> None:
         if self.rig_combo.currentText() == rig_name:
@@ -400,6 +412,72 @@ class GroupEventDialog(QDialog):
         """Generate a time-based Event ID from current UTC time."""
         if not self.event_id:
             self.event_id = generate_time_based_id()
+
+    def prefill(self, data: dict) -> None:
+        """Pre-populate fields from a previously received Event, for forwarding."""
+        if data.get("grid"):
+            self.grid_field.setText(data["grid"])
+
+        message = (data.get("comments") or "").replace("||", "\n")
+        self._forward_original_message = message
+        self.message_edit.setPlainText(message)
+
+        if data.get("sr_id"):
+            self.event_id = data["sr_id"]
+
+        if hasattr(self, 'pin_combo'):
+            self.pin_combo.setCurrentIndex(0 if data.get("pinned") else 1)
+
+        if data.get("origin_callsign"):
+            self._forward_origin = data["origin_callsign"]
+            if hasattr(self, 'from_field'):
+                self.from_field.setText(self._forward_origin)
+                self.from_field.setReadOnly(True)
+            if hasattr(self, '_forward_mode_label'):
+                self._forward_mode_label.show()
+            if hasattr(self, 'btn_save'):
+                self.btn_save.setEnabled(False)
+            self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT_FORWARD)
+            self._lock_for_forward_mode()
+
+        # If a rig is already selected (e.g. Internet Only pre-selected at open),
+        # update the message now since _on_rig_changed fired before prefill set
+        # _forward_origin.
+        if hasattr(self, 'rig_combo'):
+            current_rig = self.rig_combo.currentText()
+            if current_rig == INTERNET_RIG:
+                callsign, _, _ = self._get_internet_user_settings()
+                if callsign:
+                    self._forwarder_callsign = callsign
+                    self._update_forward_message_field(callsign)
+            elif self._forwarder_callsign:
+                self._update_forward_message_field(self._forwarder_callsign)
+
+    def _lock_for_forward_mode(self) -> None:
+        """Lock Event structure fields when forwarding.
+
+        Forwarding preserves the original event verbatim. The user may only
+        change Rig, Mode, Delivery, and Group (target) — Grid, Pin to Map,
+        and the message body are read-only.
+        """
+        if hasattr(self, 'grid_field'):
+            self.grid_field.setReadOnly(True)
+        if hasattr(self, 'pin_combo'):
+            self.pin_combo.setEnabled(False)
+        if hasattr(self, 'message_edit'):
+            self.message_edit.setReadOnly(True)
+        if hasattr(self, 'btn_gf'):
+            self.btn_gf.setEnabled(False)
+
+    def _update_forward_message_field(self, callsign: str) -> None:
+        """Update the message field to show 'original_message - Forwarded By: {callsign}'."""
+        if not getattr(self, '_forward_origin', None) or not callsign:
+            return
+        base = getattr(self, '_forward_original_message', "")
+        suffix = f" - Forwarded By: {callsign}"
+        full = (base + suffix) if base else suffix.lstrip()
+        if hasattr(self, 'message_edit'):
+            self.message_edit.setPlainText(full)
 
     def _setup_ui(self) -> None:
         """Build the user interface."""
@@ -569,7 +647,7 @@ class GroupEventDialog(QDialog):
 
         self.message_edit = QtWidgets.QPlainTextEdit()
         self.message_edit.setFont(mono_font())
-        self.message_edit.setMinimumHeight(160)
+        self.message_edit.setFixedHeight(160)
         self.message_edit.setPlaceholderText(
             f"Max {MESSAGE_MAX_RADIO} characters, multiple lines allowed"
         )
@@ -580,6 +658,16 @@ class GroupEventDialog(QDialog):
         layout.addWidget(self.message_edit)
 
         layout.addStretch()
+
+        self._forward_mode_label = QtWidgets.QLabel("Forward Mode - RF + Internet")
+        self._forward_mode_label.setAlignment(Qt.AlignCenter)
+        self._forward_mode_label.setFont(label_font())
+        self._forward_mode_label.setStyleSheet(
+            "background-color: #FFFF00; color: #000000; border-radius: 4px; padding: 4px;"
+        )
+        self._forward_mode_label.setMinimumHeight(28)
+        self._forward_mode_label.hide()
+        layout.addWidget(self._forward_mode_label)
 
         # ── Buttons: Help | Grid Finder | Save Only | Transmit | Cancel ─
         # Same 5-column stretch grid as Status Report so button width matches.
@@ -699,12 +787,16 @@ class GroupEventDialog(QDialog):
         """Build the Group Event message string for transmission.
 
         Format: CALLSIGN: @GROUP ,GRID,6,ID,PIN,MESSAGE,{##}
+        Forwarded: ORIGIN_CALL: @GROUP ,GRID,6,ID,PIN,MESSAGE,{F#}
         Scope slot is hardcoded to "6" (Event); the normal 12-digit status
         string is replaced by a single Pin-to-Map digit ("1"/"0").
         """
         message = self._clean_message(self.message_edit.toPlainText().strip())
         pin_flag = "1" if self.pin_combo.currentText() == "Yes" else "0"
         group = f"@{self.to_combo.currentText()}"
+        if getattr(self, "_forward_origin", None):
+            marker = "{F#}"
+            return f"{self._forward_origin.upper()}: {group} ,{self.grid},6,{self.event_id},{pin_flag},{message},{marker}"
         marker = "{#3}" if self.rig_combo.currentText() == INTERNET_RIG else "{##}"
         return f"{self.callsign.upper()}: {group} ,{self.grid},6,{self.event_id},{pin_flag},{message},{marker}"
 
@@ -845,14 +937,17 @@ class GroupEventDialog(QDialog):
                 return
             self.callsign = callsign
             self._pending_message = self._build_message()
-            self._pending_save_data = self._capture_save_data(0)
+            if not getattr(self, '_forward_origin', None):
+                self._pending_save_data = self._capture_save_data(0)
 
-            def _on_internet_commsrvr_complete(global_id: int) -> None:
-                if global_id:
-                    self._save_to_database(0, global_id)
-                    QtCore.QTimer.singleShot(0, self._refresh_and_close)
+                def _on_internet_commsrvr_complete(global_id: int) -> None:
+                    if global_id:
+                        self._save_to_database(0, global_id)
+                        QtCore.QTimer.singleShot(0, self._refresh_and_close)
 
-            self._submit_to_commsrvr_async(0, on_complete=_on_internet_commsrvr_complete)
+                self._submit_to_commsrvr_async(0, on_complete=_on_internet_commsrvr_complete)
+            else:
+                self._submit_to_commsrvr_async(0)
 
             now = QDateTime.currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss")
             print(f"\n{'='*60}")
@@ -865,6 +960,9 @@ class GroupEventDialog(QDialog):
             print(f"  Pin:      {self.pin_combo.currentText()}")
             print(f"  Message:  {self._pending_message}")
             print(f"{'='*60}\n")
+            if getattr(self, '_forward_origin', None):
+                self._refresh_parent_data()
+                self.accept()
             return
 
         if "(disconnected)" in rig_name:
@@ -930,15 +1028,19 @@ class GroupEventDialog(QDialog):
             client.send_tx_message(self._pending_message)
 
             deferred_close = False
-            self._pending_save_data = self._capture_save_data(frequency)
-            if self.delivery_combo.currentText() == "Limited Reach":
-                self._save_to_database(frequency, 0)
-            else:
-                deferred_close = True
-                def _on_radio_commsrvr_complete(global_id: int) -> None:
-                    self._save_to_database(frequency, global_id)
-                    QtCore.QTimer.singleShot(0, self._refresh_and_close)
-                self._submit_to_commsrvr_async(frequency, on_complete=_on_radio_commsrvr_complete)
+            if not getattr(self, '_forward_origin', None):
+                self._pending_save_data = self._capture_save_data(frequency)
+                if self.delivery_combo.currentText() == "Limited Reach":
+                    self._save_to_database(frequency, 0)
+                else:
+                    deferred_close = True
+                    def _on_radio_commsrvr_complete(global_id: int) -> None:
+                        self._save_to_database(frequency, global_id)
+                        QtCore.QTimer.singleShot(0, self._refresh_and_close)
+                    self._submit_to_commsrvr_async(frequency, on_complete=_on_radio_commsrvr_complete)
+            elif self.delivery_combo.currentText() != "Limited Reach":
+                # Forwarding path — still submit to commsrvr, no DB write
+                self._submit_to_commsrvr_async(frequency)
 
             now = QDateTime.currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss")
             freq_mhz = frequency / 1000000.0 if frequency else 0
