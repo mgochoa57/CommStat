@@ -6914,7 +6914,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
             now = time.time()
             refresh_min = self.config.get_earthquake_refresh() if hasattr(self.config, "get_earthquake_refresh") else 10
-            if getattr(self, "_earthquake_cache", None) and now - getattr(self, "_earthquake_cache_time", 0) < max(300, refresh_min * 60):
+            # is not None (not truthiness) — an empty list is a legitimate "no
+            # quakes matched the filter" cache and must still throttle, or a
+            # quiet feed refetches (and re-stamps cache_time) on every single
+            # call, which never lets the poll in _ensure_earthquake_data_async
+            # settle and forces a full map reload in a near-continuous loop.
+            if getattr(self, "_earthquake_cache", None) is not None and now - getattr(self, "_earthquake_cache_time", 0) < max(300, refresh_min * 60):
                 return self._earthquake_cache
 
             request = urllib.request.Request(url, headers={"User-Agent": "CommStat/2.5"})
@@ -7074,7 +7079,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
             now = time.time()
             refresh_min = self.config.get_wildfire_refresh() if hasattr(self.config, "get_wildfire_refresh") else 30
-            if getattr(self, "_wildfire_cache", None) and now - getattr(self, "_wildfire_cache_time", 0) < max(300, refresh_min * 60):
+            # is not None (not truthiness) — see the matching comment in
+            # _fetch_earthquake_events: an empty list is a legitimate "no
+            # fires matched the filter" cache and must still throttle.
+            if getattr(self, "_wildfire_cache", None) is not None and now - getattr(self, "_wildfire_cache_time", 0) < max(300, refresh_min * 60):
                 return self._wildfire_cache
 
             # WFIGS Incident Locations (Current) - NIFC's public, keyless feed of
