@@ -6987,7 +6987,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_earthquake_fetch_in_progress", False):
             return
         self._earthquake_fetch_in_progress = True
-        cache_time_before = getattr(self, "_earthquake_cache_time", 0)
 
         def worker() -> None:
             self._fetch_earthquake_events()
@@ -6998,7 +6997,12 @@ class MainWindow(QtWidgets.QMainWindow):
         def poll() -> None:
             if self._earthquake_fetch_in_progress:
                 QTimer.singleShot(200, poll)
-            elif self.map_loaded and getattr(self, "_earthquake_cache_time", 0) != cache_time_before:
+            # Compare against what's actually on screen, not a snapshot taken
+            # before this fetch started — an unrelated _load_map() (e.g. the
+            # startup connectivity refresh) may have already rendered this
+            # same fresh data while the fetch was in flight, in which case
+            # reloading again here would just be a redundant extra flash.
+            elif self.map_loaded and getattr(self, "_earthquake_cache_time", 0) != getattr(self, "_earthquake_rendered_cache_time", 0):
                 self._save_map_position(callback=self._load_map)
 
         QTimer.singleShot(200, poll)
@@ -7055,6 +7059,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 eq_marker.options["pane"] = "eqPane"
                 eq_marker.add_to(fg)
             fg.add_to(m)
+            self._earthquake_rendered_cache_time = getattr(self, "_earthquake_cache_time", 0)
         except Exception as e:
             print(f"[Earthquake] map overlay failed: {e}")
 
@@ -7156,7 +7161,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_wildfire_fetch_in_progress", False):
             return
         self._wildfire_fetch_in_progress = True
-        cache_time_before = getattr(self, "_wildfire_cache_time", 0)
 
         def worker() -> None:
             self._fetch_wildfire_events()
@@ -7167,7 +7171,11 @@ class MainWindow(QtWidgets.QMainWindow):
         def poll() -> None:
             if self._wildfire_fetch_in_progress:
                 QTimer.singleShot(200, poll)
-            elif self.map_loaded and getattr(self, "_wildfire_cache_time", 0) != cache_time_before:
+            # See _ensure_earthquake_data_async's matching comment: compare
+            # against what's actually on screen, not a pre-fetch snapshot,
+            # so an unrelated reload that already picked up this same fresh
+            # data doesn't get followed by a redundant extra one here.
+            elif self.map_loaded and getattr(self, "_wildfire_cache_time", 0) != getattr(self, "_wildfire_rendered_cache_time", 0):
                 self._save_map_position(callback=self._load_map)
 
         QTimer.singleShot(200, poll)
@@ -7215,6 +7223,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     tooltip=f"{fire['name']} ({acres:,.0f} ac)"
                 ).add_to(fg)
             fg.add_to(m)
+            self._wildfire_rendered_cache_time = getattr(self, "_wildfire_cache_time", 0)
         except Exception as e:
             print(f"[Wildfire] map overlay failed: {e}")
 
