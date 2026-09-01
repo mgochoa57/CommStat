@@ -48,12 +48,12 @@ _WIN_W = 720
 _WIN_H = 540
 
 _PRESET_CODES = [
-    ("GY9875",
+    ("GY9875", "Install Dark Map API Key",
      "Fetches the map tile API key from the <b>CommStat</b> server and saves "
      "it locally, so the Dark Map basemap renders without the "
      "\"API key required\" watermark.<br><br>"
      "Safe to run more than once — re-running it just refreshes the saved key."),
-    ("AA3815",
+    ("AA3815", "Refresh QRZ Contacts",
      "If you <b>DO NOT</b> have a <b>QRZ subscription</b>, running this code "
      "will trigger an update from the <b>CommStat</b> server and refresh all "
      "of your QRZ contacts in the local database.<br><br>"
@@ -108,7 +108,7 @@ class _MaintenanceWorker(QThread):
                 return
             self.result_ready.emit(
                 "success",
-                "The update was applied successfully. Restart CommStat to apply the changes.",
+                "The update was applied successfully.",
                 config_updates,
             )
             return
@@ -197,13 +197,13 @@ class MaintenanceDialog(QDialog):
         )
         layout.addWidget(lbl_presets_heading)
 
-        for code, description in _PRESET_CODES:
-            layout.addWidget(self._build_preset_code_box(code, description))
+        for code, title, description in _PRESET_CODES:
+            layout.addWidget(self._build_preset_code_box(code, title, description))
 
         layout.addStretch()
 
-    def _build_preset_code_box(self, code: str, description: str) -> QFrame:
-        """Builds a bordered "code + description" box for the Available Codes section."""
+    def _build_preset_code_box(self, code: str, title: str, description: str) -> QFrame:
+        """Builds a bordered "code + title + description" box for the Available Codes section."""
         box = QFrame()
         box.setStyleSheet(
             f"QFrame {{ background-color:{_BOX_BG}; border:1px solid #999999; border-radius:4px; }}"
@@ -213,9 +213,12 @@ class MaintenanceDialog(QDialog):
         row.setContentsMargins(8, 8, 8, 8)
         row.setSpacing(4)
 
-        lbl_code = QLabel(code)
+        lbl_code = QLabel(
+            f"<span style='font-family:Roboto Mono;'>{code}</span> "
+            f"<span style='font-family:Roboto;'>— {title}</span>"
+        )
         lbl_code.setStyleSheet(
-            f"QLabel {{ font-family:Roboto Mono; font-size:13px; font-weight:bold; border:none; color:{_PANEL_FG}; }}"
+            f"QLabel {{ font-size:13px; font-weight:bold; border:none; color:{_PANEL_FG}; }}"
         )
         row.addWidget(lbl_code)
 
