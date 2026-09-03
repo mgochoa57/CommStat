@@ -46,11 +46,14 @@ _COL_CANCEL = "#555555"
 _WIN_W      = 680
 _WIN_H      = 340
 
-_TABLE_COLS = ["Callsign", "Grid Square", "State", "Notify", "Default Map"]
+_TABLE_COLS = ["Callsign", "Grid Square", "State", "Notifications", "Default Map"]
 
 _NOTIFY_DESCRIPTION = (
-    "Notify shows a popup when a message arrives addressed to your callsign. "
-    "Turn it off to stop the popup — the message still arrives and appears in Messages."
+    "Notifications control three popups: one when a message arrives addressed to your "
+    "callsign, one when the CommStat server confirms a message you sent was delivered, "
+    "and one when a message you sent expired before it was retrieved. Turn this off to "
+    "stop all three popups — messages still arrive, still send, and still appear in "
+    "Messages; only the pop-up alerts are suppressed."
 )
 
 _REGIONS = [

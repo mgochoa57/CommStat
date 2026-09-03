@@ -2527,7 +2527,8 @@ class DatabaseManager:
         return self._execute(op, False)
 
     def get_notify_enabled(self) -> bool:
-        """Get whether the new-message popup is enabled; defaults to True."""
+        """Get whether message notifications (new-message, delivery-
+        confirmation, and expired popups) are enabled; defaults to True."""
         def op(cursor, conn):
             try:
                 cursor.execute("SELECT mssgNotify FROM controls WHERE id = 1")
@@ -2538,7 +2539,8 @@ class DatabaseManager:
         return self._execute(op, True)
 
     def set_notify_enabled(self, enabled: bool) -> bool:
-        """Save whether the new-message popup is enabled."""
+        """Save whether message notifications (new-message, delivery-
+        confirmation, and expired popups) are enabled."""
         def op(cursor, conn):
             try:
                 cursor.execute(
@@ -3588,7 +3590,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menubar.setStyleSheet(self._menubar_qss())
 
         # Create the main menu
-        self.menu = _MenuBarMenu("Config", self.menubar)
+        self.menu = _MenuBarMenu("Settings", self.menubar)
         self.menubar.addMenu(self.menu)
 
         # Define menu actions: (name, text, handler)
@@ -3600,6 +3602,10 @@ class MainWindow(QtWidgets.QMainWindow):
             ("sound_settings", "Sound Settings",  self._on_sound_settings),
             ("manage_watchlists", "Manage Watchlists", self._on_manage_watchlists),
         ]
+
+        configuration_label = QtWidgets.QAction("Configuration", self)
+        configuration_label.setEnabled(False)  # Disabled as a section title
+        self.menu.addAction(configuration_label)
 
         # Create actions for dropdown menu
         self.actions: Dict[str, QtWidgets.QAction] = {}
@@ -5811,6 +5817,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self, "_show_new_message_popup",
                     QtCore.Qt.QueuedConnection,
                     QtCore.Q_ARG(str, from_callsign),
+                    QtCore.Q_ARG(str, str(data.get('msg_id', ''))),
+                    QtCore.Q_ARG(str, str(data.get('message', ''))),
+                    QtCore.Q_ARG(str, str(data.get('global_id', 0))),
                 )
             return msg_type
         except sqlite3.IntegrityError as e:
@@ -6155,7 +6164,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(str, str)
     def _show_delivered_popup(self, callsign: str, message: str) -> None:
-        """Show a delivery confirmation popup when the commsrvr confirms a message was delivered."""
+        """Show a delivery confirmation popup when the commsrvr confirms a message was delivered,
+        unless the user has disabled it in User Settings (controls.mssgNotify)."""
+        if not self.db.get_notify_enabled():
+            return
         print(f"[DELIVERED] Showing popup — callsign={callsign!r}  message={message!r}")
         from qrz_lookup import DeliveryConfirmationDialog
         dlg = DeliveryConfirmationDialog(
@@ -6171,7 +6183,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(str, str)
     def _show_expired_popup(self, callsign: str, message: str) -> None:
-        """Show an expiry popup when the commsrvr reports a message expired before retrieval."""
+        """Show an expiry popup when the commsrvr reports a message expired before retrieval,
+        unless the user has disabled it in User Settings (controls.mssgNotify)."""
+        if not self.db.get_notify_enabled():
+            return
         print(f"[EXPIRED] Showing popup — callsign={callsign!r}  message={message!r}")
         from qrz_lookup import MessageExpiredDialog
         dlg = MessageExpiredDialog(
@@ -6185,16 +6200,35 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         dlg.exec_()
 
-    @QtCore.pyqtSlot(str)
-    def _show_new_message_popup(self, callsign: str) -> None:
+    @QtCore.pyqtSlot(str, str, str, str)
+    def _show_new_message_popup(self, callsign: str, msg_id: str, message_text: str, global_id: str) -> None:
         """Show a notification popup when a message arrives addressed to
         one of our own callsigns, unless the user has disabled it in
-        User Settings (controls.mssgNotify)."""
+        User Settings (controls.mssgNotify). "Open" closes the popup and
+        opens the message detail dialog, mirroring _on_message_click."""
+        print(f"[MESSAGE] Received message from {callsign!r} — Global ID: {global_id}")
         if not self.db.get_notify_enabled():
             return
         from qrz_lookup import NewMessagePopupDialog
         dlg = NewMessagePopupDialog(callsign=callsign, parent=self)
-        dlg.exec_()
+        if dlg.exec_() == NewMessagePopupDialog.Opened:
+            from qrz_lookup import MessageDetailDialog
+            detail = MessageDetailDialog(
+                callsign, message_text, self._internet_available,
+                module_background=self.config.get_color('module_background'),
+                module_foreground=self.config.get_color('module_foreground'),
+                data_background=self.config.get_color('data_background'),
+                program_background=self.config.get_color('program_background'),
+                program_foreground=self.config.get_color('program_foreground'),
+                msg_id=msg_id,
+                tcp_pool=self.tcp_pool,
+                connector_manager=self.connector_manager,
+                refresh_callback=self._load_message_data,
+                parent=self
+            )
+            detail.record_deleted.connect(self._load_message_data)
+            if detail.exec_() == 1:
+                self._load_message_data()
 
     @QtCore.pyqtSlot(set)
     def _refresh_commsrvr_data(self, data_types: set) -> None:

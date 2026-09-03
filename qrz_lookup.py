@@ -3176,6 +3176,7 @@ class NewMessagePopupDialog(QDialog):
 
     _BG_IMAGE = "00-message.png"
     _FALLBACK_SIZE = (460, 190)
+    Opened = 2  # QDialog.exec_() result code when "Open" is clicked
 
     def __init__(self, callsign: str, parent=None):
         super().__init__(parent)
@@ -3207,7 +3208,8 @@ class NewMessagePopupDialog(QDialog):
             "QLabel { background-color: rgba(0, 0, 0, 170); color: #FFFFFF;"
             " font-size: 18px; }"
         )
-        banner.setGeometry(0, (h - banner_h) // 2, w, banner_h)
+        banner_w = w // 2
+        banner.setGeometry((w - banner_w) // 2, (h - banner_h) // 2, banner_w, banner_h)
         banner.raise_()
 
         self.btn_close = _btn("Close", _COL_CANCEL)
@@ -3216,3 +3218,10 @@ class NewMessagePopupDialog(QDialog):
         self.btn_close.adjustSize()
         self.btn_close.move(w - self.btn_close.width() - 12, h - self.btn_close.height() - 12)
         self.btn_close.raise_()
+
+        self.btn_open = _btn("Open Message", COLOR_BTN_GREEN)
+        self.btn_open.setParent(self)
+        self.btn_open.clicked.connect(lambda: self.done(self.Opened))
+        self.btn_open.adjustSize()
+        self.btn_open.move(12, h - self.btn_open.height() - 12)
+        self.btn_open.raise_()
