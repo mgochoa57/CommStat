@@ -501,6 +501,7 @@ class GroupMessageDialog(QDialog):
             try:
                 data_string = f"{now}\t{frequency}\t0\t30\t{message_data}"
                 post_data = urllib.parse.urlencode({'cs': callsign, 'data': data_string}).encode('utf-8')
+                print(f"[Commsrvr] POST data: {post_data}")
                 req = urllib.request.Request(_DATAFEED, data=post_data, method='POST')
                 with urllib.request.urlopen(req, timeout=5, context=create_verified_ssl_context()) as response:
                     result = response.read().decode('utf-8').strip()

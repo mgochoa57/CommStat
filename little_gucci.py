@@ -101,6 +101,7 @@ import netguard
 # This allows the developer to push messages/images to all CommStat users
 _COMMSRVR = base64.b64decode("aHR0cHM6Ly9jb21tc3RhdC5hcHA=").decode()
 _PING = _COMMSRVR + "/heartbeat-808585.php"
+_DELIVERY_CONFIRM = _COMMSRVR + "/delivery-confirmation-808585.php"
 
 # Default hyperlink blue - used to style the StatRep table's clickable
 # From/ID columns like links (color + underline, always on, not just hover).
@@ -740,6 +741,88 @@ class UpperCaseLineEdit(QtWidgets.QLineEdit):
             mime = QtCore.QMimeData()
             mime.setText(source.text().upper())
             super().insertFromMimeData(mime)
+
+
+class _FilterHeader(QtWidgets.QHeaderView):
+    """Horizontal table header with an optional per-column filter row pinned
+    directly beneath the column labels.
+
+    The filter boxes used to be cell widgets in row 0 of the table, so they
+    scrolled out of view with the data. Here they're children of the header
+    instead: while the filter is shown the header grows by strip_h, the
+    labels keep painting in the top label_h band, and the strip below is
+    painted like a table row (data background + gridlines) with a QLineEdit
+    laid over each filterable column. Because the header height is what
+    QTableView uses to place the viewport and size the scrollbars, Qt's own
+    geometry bookkeeping stays consistent and the boxes never scroll away.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget, label_h: int, strip_h: int,
+                 strip_bg: str, grid_color: str) -> None:
+        super().__init__(Qt.Horizontal, parent)
+        self.label_h = label_h
+        self.strip_h = strip_h
+        self._strip_bg = QColor(strip_bg)
+        self._grid_color = QColor(grid_color)
+        self._filter_on = False
+        self.edits: Dict[int, QtWidgets.QLineEdit] = {}
+        self.setFixedHeight(label_h)
+        # Column drags and the one-time resizeColumnsToContents() both land
+        # here; geometriesChanged also covers stretch-last-section refits.
+        self.sectionResized.connect(lambda *_: self._layout_edits())
+        self.geometriesChanged.connect(self._layout_edits)
+        # Horizontal scrolling shifts the header's offset without any of the
+        # signals above (setOffset isn't virtual either), so follow the
+        # table's scrollbar directly - matters for the wide contacts table.
+        hbar = parent.horizontalScrollBar() if hasattr(parent, 'horizontalScrollBar') else None
+        if hbar is not None:
+            hbar.valueChanged.connect(lambda *_: self._layout_edits())
+
+    def add_filter_edit(self, col: int, edit: QtWidgets.QLineEdit) -> None:
+        """Adopt `edit` as the filter box for logical column `col`."""
+        edit.setParent(self.viewport())
+        edit.setVisible(self._filter_on)
+        self.edits[col] = edit
+        self._layout_edits()
+
+    def set_filter_visible(self, on: bool) -> None:
+        if on == self._filter_on:
+            return
+        self._filter_on = on
+        self.setFixedHeight(self.label_h + (self.strip_h if on else 0))
+        for edit in self.edits.values():
+            edit.setVisible(on)
+        self._layout_edits()
+        # QTableView connects this signal to its updateGeometries() slot,
+        # which re-reads our height for the viewport margin and scrollbars.
+        self.geometriesChanged.emit()
+        self.viewport().update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._layout_edits()
+
+    def _layout_edits(self) -> None:
+        if not self._filter_on:
+            return
+        for col, edit in self.edits.items():
+            x = self.sectionViewportPosition(col)
+            w = self.sectionSize(col)
+            # Leave the strip's right/bottom gridline visible around the box.
+            edit.setGeometry(x, self.label_h, max(0, w - 1), self.strip_h - 1)
+
+    def paintSection(self, painter, rect, logicalIndex) -> None:
+        if not self._filter_on:
+            super().paintSection(painter, rect, logicalIndex)
+            return
+        label_rect = QtCore.QRect(rect.x(), rect.y(), rect.width(), self.label_h)
+        super().paintSection(painter, label_rect, logicalIndex)
+        strip = QtCore.QRect(rect.x(), rect.y() + self.label_h,
+                             rect.width(), rect.height() - self.label_h)
+        painter.fillRect(strip, self._strip_bg)
+        painter.setPen(self._grid_color)
+        painter.drawLine(strip.right(), strip.top(), strip.right(), strip.bottom())
+        painter.drawLine(strip.left(), strip.bottom(), strip.right(), strip.bottom())
 
 
 # =============================================================================
@@ -2993,44 +3076,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if x is None or y is None:
             return
 
-        # Pre-show move so the window paints roughly in the right place.
+        # move(x, y) before show() places the visible frame's top-left corner
+        # at exactly (x, y) on Windows/DWM, and pos() reports that same point
+        # while the native window is alive - so saving pos() and restoring it
+        # with move() is a stable fixed point with no frame-margin fudge.
+        # (The old margin-subtracting compensation here was over-correcting;
+        # the real drift came from _save_window_position reading pos() after
+        # the native window was already destroyed - see closeEvent.)
         self.move(x, y)
 
-        # Qt's move(x, y) on Windows DWM leaves pos() reporting (x + margin_left,
-        # y + margin_top) after WM_NCCALCSIZE fires — and the visible window has
-        # actually drifted by that offset. Without compensation, every save→
-        # restore cycle adds one frame margin and the window walks down/right
-        # across launches. Once windowHandle().frameMargins() is populated,
-        # re-move with the margins subtracted so the saved/restored position is
-        # a stable fixed point.
-        #
-        # frameMargins() isn't populated until after the window is shown, so
-        # the compensating move necessarily happens post-show — stay invisible
-        # until it lands (or gives up) instead of visibly jumping into place.
-        self.setWindowOpacity(0.0)
+        # Some window managers ignore a pre-show move; re-apply once the
+        # window is up if it didn't land.
+        target = QtCore.QPoint(x, y)
 
-        target_x, target_y = x, y
-        state = {"attempts": 0, "applied": False}
+        def _verify() -> None:
+            if self.isVisible() and self.pos() != target:
+                self.move(target)
 
-        def _compensate() -> None:
-            state["attempts"] += 1
-            win = self.windowHandle()
-            margins = win.frameMargins() if win is not None else None
-
-            if margins is None or not (margins.left() or margins.top()):
-                if state["attempts"] < 30:
-                    QTimer.singleShot(100, _compensate)
-                else:
-                    self.setWindowOpacity(1.0)
-                return
-
-            if state["applied"]:
-                return
-            state["applied"] = True
-            self.move(target_x - margins.left(), target_y - margins.top())
-            self.setWindowOpacity(1.0)
-
-        QTimer.singleShot(150, _compensate)
+        QTimer.singleShot(0, _verify)
 
     def closeEvent(self, event) -> None:
         """Clean up resources and save window position before closing."""
@@ -3055,6 +3118,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_window_position(self) -> None:
         """Save window geometry to config.ini."""
+        # closeEvent already saved, and by the time aboutToQuit fires after a
+        # native close the platform window is gone: pos() then reports the
+        # client-area origin instead of the frame origin (one title bar lower),
+        # which is what made the position creep between launches.
+        if getattr(self, "_window_position_saved", False):
+            return
+        self._window_position_saved = True
+
         config = ConfigParser()
         if os.path.exists(CONFIG_FILE):
             config.read(CONFIG_FILE)
@@ -3977,7 +4048,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fix_plain_menu_indent(self.websites_menu)
 
         create_action(self.menubar, "Help", "help", self._on_help)
-        create_action(self.menubar, "Exit" + " " * 10, "exit", qApp.quit)
+        # close() rather than qApp.quit() so Exit runs the same closeEvent path
+        # as the title-bar X: timers stopped, TCP pool disconnected, position
+        # saved while the window is still alive.
+        create_action(self.menubar, "Exit" + " " * 10, "exit", self.close)
         create_action(self.menubar, "What's New" + " " * 10, "whats_new", self._on_whats_new)
         create_action(self.menubar, "Live Better", "live_better", self._on_live_better)
 
@@ -4907,7 +4981,9 @@ class MainWindow(QtWidgets.QMainWindow):
         margin = 23  # yields a 40px gap to the table edge (23 + 17px scrollbar)
         scrollbar = table.verticalScrollBar()
         sb_w = scrollbar.width() if scrollbar and scrollbar.isVisible() else 0
-        header_h = table.horizontalHeader().height()
+        # Center within the label band only - the header is taller while the
+        # pinned filter strip is shown, and the link belongs with the labels.
+        header_h = table.horizontalHeader().label_h
         x = table.width() - btn.width() - sb_w - margin
         y = max(0, (header_h - btn.height()) // 2)
         btn.move(max(0, x), y)
@@ -5117,6 +5193,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 statrep_h = max(100, total - feed_h - pane_h - handle_px)
                 self.content_splitter.setSizes([statrep_h, feed_h, 0, pane_h])
                 self._load_contacts_data()
+                # The pinned filter boxes keep their text across view
+                # switches; honor it (and its Records count) on the reload.
+                self._apply_contacts_filter()
                 self.contacts_table.viewport().setFocus()
             else:
                 QTimer.singleShot(0, lambda: self._set_map_view_mode("contacts"))
@@ -5759,7 +5838,8 @@ class MainWindow(QtWidgets.QMainWindow):
         id_field: str,
         msg_type: str,
         from_callsign: str,
-        extra_info: str = ""
+        extra_info: str = "",
+        raw_line: str = ""
     ) -> str:
         """
         Generic database insert with standardized error handling.
@@ -5772,6 +5852,11 @@ class MainWindow(QtWidgets.QMainWindow):
             msg_type: Return value on success (e.g., "statrep", "message")
             from_callsign: Sender callsign for logging
             extra_info: Optional extra info for success message (e.g., " (FORWARDED)")
+            raw_line: Data line as received (verbatim for commsrvr traffic, an
+                equivalent built from JS8Call params for TCP traffic). When set
+                and this insert is a direct message to one of our callsigns,
+                it's echoed back to the server as a delivery confirmation
+                alongside the new-message popup.
 
         Returns:
             msg_type on success, empty string on failure
@@ -5821,6 +5906,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Q_ARG(str, str(data.get('message', ''))),
                     QtCore.Q_ARG(str, str(data.get('global_id', 0))),
                 )
+                if raw_line:
+                    self._send_delivery_confirmation(raw_line)
             return msg_type
         except sqlite3.IntegrityError as e:
             if id_field in str(e) or "UNIQUE" in str(e):
@@ -6028,6 +6115,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 data_id = int(id_match.group(1))
                 data = id_match.group(2).strip()
+                raw_data_line = data
 
                 # Track the highest ID we've seen
                 if data_id > last_data_id:
@@ -6101,7 +6189,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     # Parse using unified parser (source=2 for Internet)
                     msg_type, _ = self._parse_commstat_message(
-                        "COMMSRVR", from_callsign, message_value, target, "", freq, db, utc, source=2, global_id=data_id
+                        "COMMSRVR", from_callsign, message_value, target, "", freq, db, utc, source=2, global_id=data_id,
+                        raw_line=raw_data_line
                     )
 
                     if msg_type:
@@ -6229,6 +6318,35 @@ class MainWindow(QtWidgets.QMainWindow):
             detail.record_deleted.connect(self._load_message_data)
             if detail.exec_() == 1:
                 self._load_message_data()
+
+    def _send_delivery_confirmation(self, raw_line: str) -> None:
+        """POST the exact data line back to the server as delivery confirmation
+        for a direct message addressed to one of our callsigns — commsrvr
+        (Internet) traffic passes the raw server line verbatim; TCP (Radio)
+        traffic passes an equivalent line built from the JS8Call params.
+
+        Callers include the main/UI thread (TCP messages arrive via a Qt
+        socket signal, see _handle_tcp_message/_process_directed_message) as
+        well as the background thread already used for commsrvr polling, so
+        the actual network call always runs on its own daemon thread to
+        never block the UI. Never raises — a failure here only logs and does
+        not affect the message insert or popup that triggered it.
+        """
+        if not netguard.guard("Delivery confirmation"):
+            return
+
+        def _send():
+            try:
+                post_data = urllib.parse.urlencode({'data': raw_line}).encode('utf-8')
+                print(f"[Delivery Confirmation] POST data: {post_data}")
+                req = urllib.request.Request(_DELIVERY_CONFIRM, data=post_data, method='POST')
+                with urllib.request.urlopen(req, timeout=10, context=create_verified_ssl_context()) as response:
+                    result = response.read().decode('utf-8').strip()
+                print(f"[Delivery Confirmation] Server response: {result!r}")
+            except Exception as e:
+                print(f"[Delivery Confirmation] Failed to send: {type(e).__name__}: {e}")
+
+        threading.Thread(target=_send, daemon=True).start()
 
     @QtCore.pyqtSlot(set)
     def _refresh_commsrvr_data(self, data_types: set) -> None:
@@ -6502,10 +6620,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_table.setColumnCount(7)
         self.message_table.setRowCount(0)
 
+        # Custom header so the FILTER row can be pinned beneath the column
+        # labels instead of scrolling away as table row 0. Installed before
+        # _setup_table_widget so its header styling/resize modes apply to it.
+        header = _FilterHeader(
+            self.message_table, label_h=30, strip_h=30,
+            strip_bg=self.config.get_color('data_background'),
+            grid_color="#D2D0CF",
+        )
+        self.message_table.setHorizontalHeader(header)
+
         self._setup_table_widget(self.message_table, [
             "", "Date Time", "Freq", "From", "To", "ID", ""
         ])
-        self.message_table.horizontalHeader().setFixedHeight(30)
+
+        # Per-column filter boxes, mirroring the contacts table's filter row.
+        # No box for Date Time, Freq, or ID (not useful to free-text filter),
+        # nor for the blank SNR-color column (col 0, which never has text).
+        # Created once and kept for the life of the table; the header shows
+        # and hides them with the filter toggle.
+        _EXCLUDED_COLS = {0, 1, 2, 5}  # "", Date Time, Freq, ID
+        filter_font = QtGui.QFont("Kode Mono", -1)
+        filter_font.setPixelSize(13)
+        filter_style = (
+            "QLineEdit { background-color: white; color: #333333; "
+            "border: none; padding: 1px 3px; }"
+        )
+        for col in range(self.message_table.columnCount()):
+            if col in _EXCLUDED_COLS:
+                continue
+            edit = QtWidgets.QLineEdit()
+            edit.setFont(filter_font)
+            edit.setStyleSheet(filter_style)
+            edit.textChanged.connect(lambda text, c=col: self._on_message_filter_changed(c, text))
+            header.add_filter_edit(col, edit)
+
         self.message_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.message_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.message_table.setMinimumSize(320, 180)
@@ -6581,7 +6730,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.contacts_table = QtWidgets.QTableWidget(self.central_widget)
         self.contacts_table.setObjectName("contactsTable")
         self.contacts_table.setColumnCount(len(_CONTACTS_HEADERS))
-        self.contacts_table.setRowCount(1)  # row 0 = filter row
+        self.contacts_table.setRowCount(0)
+
+        # Same pinned-filter header as the message table, so the filter
+        # boxes stay put beneath the column labels instead of scrolling
+        # away with the data. Contacts filtering is always on, so the strip
+        # is shown permanently rather than toggled.
+        header = _FilterHeader(
+            self.contacts_table, label_h=30, strip_h=30,
+            strip_bg=self.config.get_color('data_background'),
+            grid_color="#D2D0CF",
+        )
+        self.contacts_table.setHorizontalHeader(header)
 
         self._setup_table_widget(self.contacts_table, _CONTACTS_HEADERS)
         self.contacts_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
@@ -6595,7 +6755,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.setSectionResizeMode(_MEMO_COL, QtWidgets.QHeaderView.Fixed)
         self.contacts_table.setColumnWidth(_MEMO_COL, 160)
 
-        # Embed a QLineEdit in every cell of row 0 as the filter row
+        # One filter QLineEdit per column, pinned in the header strip.
         filter_font = QtGui.QFont("Kode Mono", -1)
         filter_font.setPixelSize(13)
         filter_style = (
@@ -6612,9 +6772,9 @@ class MainWindow(QtWidgets.QMainWindow):
             edit.setFont(filter_font)
             edit.setStyleSheet(filter_style)
             edit.textChanged.connect(self._apply_contacts_filter)
-            self.contacts_table.setCellWidget(0, col, edit)
+            header.add_filter_edit(col, edit)
             self._contacts_filters.append(edit)
-        self.contacts_table.setRowHeight(0, 30)
+        header.set_filter_visible(True)
 
         self.contacts_table.itemClicked.connect(self._on_contacts_item_clicked)
         self.contacts_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -6648,15 +6808,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     "zip", "country", "grid", "class", "email", "image", "memo",
                     "insert_date"]
 
-        self.contacts_table.setHorizontalHeaderItem(
-            1, QTableWidgetItem(f"Name   ({len(rows)} Records)")
-        )
-
         self.contacts_table.setUpdatesEnabled(False)
-        self.contacts_table.setRowCount(1 + len(rows))  # row 0 reserved for filters
+        self.contacts_table.setRowCount(len(rows))
 
-        for i, row in enumerate(rows):
-            table_row = i + 1
+        for table_row, row in enumerate(rows):
             for col, key in enumerate(col_keys):
                 raw = row[key] if row[key] is not None else ""
 
@@ -6710,31 +6865,38 @@ class MainWindow(QtWidgets.QMainWindow):
             if header.sectionSize(col) > max_w:
                 header.resizeSection(col, max_w)
 
+        # Fresh rows are all visible; callers that need the filter boxes
+        # honored call _apply_contacts_filter() next, which recounts.
+        self._update_contacts_count_label()
+
     def _apply_contacts_filter(self) -> None:
-        """Show/hide data rows based on per-column filter inputs. Row 0 is always shown."""
+        """Show/hide data rows based on the pinned per-column filter inputs."""
         filters = [edit.text().strip().upper() if edit else "" for edit in self._contacts_filters]
-        for row in range(1, self.contacts_table.rowCount()):
+        for row in range(self.contacts_table.rowCount()):
             match = True
             for col, f in enumerate(filters):
                 if not f:
                     continue
                 item = self.contacts_table.item(row, col)
                 cell = item.text().upper() if item else ""
-                if col == 0:
-                    if f not in cell:
-                        match = False
-                        break
-                else:
-                    if f not in cell:
-                        match = False
-                        break
+                if f not in cell:
+                    match = False
+                    break
             self.contacts_table.setRowHidden(row, not match)
+        self._update_contacts_count_label()
+
+    def _update_contacts_count_label(self) -> None:
+        """Show the number of rows currently visible in the Name column
+        header, so the count tracks the filter boxes rather than the whole
+        QRZ cache."""
+        table = self.contacts_table
+        count = sum(1 for row in range(table.rowCount()) if not table.isRowHidden(row))
+        table.setHorizontalHeaderItem(
+            1, QTableWidgetItem(f"Name   ({count} Records)")
+        )
 
     def _on_contacts_item_clicked(self, item: QTableWidgetItem) -> None:
         """Callsign opens QRZ lookup; image opens URL; all others just select."""
-        if item.row() == 0:
-            return
-
         col = item.column()
 
         if col == 0:
@@ -6799,14 +6961,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_contacts_context_menu(self, pos) -> None:
         """Show right-click context menu with Copy option for contacts table."""
         item = self.contacts_table.itemAt(pos)
-        if not item or item.row() == 0 or item.text().strip() == "—":
+        if not item or item.text().strip() == "—":
             return
         self._show_table_copy_menu(self.contacts_table, pos)
 
     def _copy_contacts_current_cell(self) -> None:
         """Copy the currently selected contacts cell text via Ctrl+C."""
         item = self.contacts_table.currentItem()
-        if item and item.row() != 0:
+        if item:
             text = item.text().strip()
             if text and text != "—":
                 QtWidgets.QApplication.clipboard().setText(text)
@@ -6865,59 +7027,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._populate_table(self.message_table, data)
 
-        # _populate_table() rebuilds every row from scratch, so the filter
-        # row (and its QLineEdit widgets) has to be re-inserted after each
-        # reload rather than kept alive across it.
+        # _populate_table() rebuilds every row from scratch, but the filter
+        # boxes live in the header (pinned below the column labels), so they
+        # survive the reload - just re-apply their text to the fresh rows.
         if self._message_filter_active:
-            self._insert_message_filter_row()
+            self._apply_message_filter()
 
     def _toggle_message_filter(self) -> None:
-        """Toggle the message table's per-column filter row on/off."""
+        """Toggle the message table's pinned per-column filter row on/off."""
         self._message_filter_active = not self._message_filter_active
+        header = self.message_table.horizontalHeader()
         if not self._message_filter_active:
             self._message_filter_values = {}
-        self._load_message_data()
-
-    def _insert_message_filter_row(self) -> None:
-        """Insert row 0 of the message table as a per-column filter input
-        row, mirroring the contacts table's filter row. No filter box is
-        given to Date Time, Freq, or ID (not useful to free-text filter),
-        nor to the blank SNR-color column (col 0, which never has text)."""
-        _EXCLUDED_COLS = {0, 1, 2, 5}  # "", Date Time, Freq, ID
-        table = self.message_table
-
-        table.insertRow(0)
-        filter_font = QtGui.QFont("Kode Mono", -1)
-        filter_font.setPixelSize(13)
-        filter_style = (
-            "QLineEdit { background-color: white; color: #333333; "
-            "border: none; padding: 1px 3px; }"
-        )
-        self._message_filters: List[Optional[QtWidgets.QLineEdit]] = []
-        for col in range(table.columnCount()):
-            if col in _EXCLUDED_COLS:
-                self._message_filters.append(None)
-                continue
-            edit = QtWidgets.QLineEdit()
-            edit.setFont(filter_font)
-            edit.setStyleSheet(filter_style)
-            edit.setText(self._message_filter_values.get(col, ""))
-            edit.textChanged.connect(lambda text, c=col: self._on_message_filter_changed(c, text))
-            table.setCellWidget(0, col, edit)
-            self._message_filters.append(edit)
-        table.setRowHeight(0, 30)
+            for edit in header.edits.values():
+                edit.blockSignals(True)
+                edit.clear()
+                edit.blockSignals(False)
+        header.set_filter_visible(self._message_filter_active)
         self._apply_message_filter()
+        # The header just changed height; the FILTER link and counter are
+        # centered in its label band, so keep them there.
+        self._reposition_message_filter_btn()
 
     def _on_message_filter_changed(self, col: int, text: str) -> None:
         self._message_filter_values[col] = text
         self._apply_message_filter()
 
     def _apply_message_filter(self) -> None:
-        """Show/hide message rows based on the filter row's per-column text.
-        Row 0 (the filter row itself) is always shown."""
+        """Show/hide message rows based on the filter row's per-column text."""
         table = self.message_table
         filters = {col: val.strip().upper() for col, val in self._message_filter_values.items() if val.strip()}
-        for row in range(1, table.rowCount()):
+        for row in range(table.rowCount()):
             match = True
             for col, f in filters.items():
                 item = table.item(row, col)
@@ -6926,7 +7066,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     match = False
                     break
             table.setRowHidden(row, not match)
+        self._update_message_count_label()
 
+    def _update_message_count_label(self) -> None:
+        """Set the title-bar counter to the number of rows currently shown,
+        so it tracks the FILTER boxes rather than the full table."""
+        if not hasattr(self, 'message_count_label'):
+            return
+        table = self.message_table
+        count = sum(1 for row in range(table.rowCount()) if not table.isRowHidden(row))
+        label = "1 Message" if count == 1 else f"{count} Messages"
+        self.message_count_label.setText(label)
+        self.message_count_label.adjustSize()
+        self._reposition_message_filter_btn()
 
     def _fetch_earthquake_events(self) -> list:
         """Fetch and cache USGS earthquake GeoJSON. Returns cached data on failure."""
@@ -7531,7 +7683,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Create tactical quick-info popup HTML.
                     # Details link still opens the original full StatRep window.
                     sr_dt = row[1][:16] if row[1] else ""
-                    freq_text = f"{row[2]:.3f} MHz" if row[2] else ""
+                    freq_text = f"{hz_to_mhz(row[2]):.3f} MHz" if row[2] else ""
                     group_text = str(row[4]).lstrip("@") if row[4] else ""
                     status_label = {
                         "1": "Normal",
@@ -9431,12 +9583,9 @@ window.commstatBouncePin = function(srid) {
                 setattr(self, sized_attr, True)
 
         if is_message_table:
-            count = table.rowCount()
-            label = "1 Message" if count == 1 else f"{count} Messages"
-            if hasattr(self, 'message_count_label'):
-                self.message_count_label.setText(label)
-                self.message_count_label.adjustSize()
-                self._reposition_message_filter_btn()
+            # Fresh rows are all visible; _load_message_data re-applies any
+            # active FILTER text afterward, which recounts the visible rows.
+            self._update_message_count_label()
 
     def _get_normalization_settings(self) -> Tuple[bool, Optional[Dict[str, str]]]:
         """Get text normalization flag and abbreviations dict.
@@ -10372,7 +10521,8 @@ window.commstatBouncePin = function(srid) {
         snr: int,
         utc: str,
         source: int,
-        global_id: int = 0
+        global_id: int = 0,
+        raw_line: str = ""
     ) -> tuple:
         """
         Parse MESSAGE format.
@@ -10390,6 +10540,11 @@ window.commstatBouncePin = function(srid) {
             utc: UTC timestamp string "YYYY-MM-DD HH:MM:SS"
             source: 1=Radio (TCP), 2=Internet (commsrvr)
             global_id: Server-assigned message ID from commsrvr (0 for Radio/unknown)
+            raw_line: Data line as received (verbatim for commsrvr traffic, an
+                equivalent built from JS8Call params for TCP traffic), forwarded
+                to _insert_message_data so a direct message to one of our
+                callsigns can be echoed back to the server as a delivery
+                confirmation.
 
         Returns:
             (message_type, None) where message_type is "message" or ""
@@ -10492,7 +10647,7 @@ window.commstatBouncePin = function(srid) {
         }
 
         result = self._insert_message_data(
-            rig_name, "messages", data, "msg_id", "message", from_callsign
+            rig_name, "messages", data, "msg_id", "message", from_callsign, raw_line=raw_line
         )
         if result:
             return (result, None)
@@ -10670,7 +10825,8 @@ window.commstatBouncePin = function(srid) {
         snr: int,
         utc: str,
         source: int,  # 1=Radio, 2=Internet
-        global_id: int = 0
+        global_id: int = 0,
+        raw_line: str = ""
     ) -> tuple:
         """
         Parse and validate CommStat message in any format.
@@ -10694,6 +10850,12 @@ window.commstatBouncePin = function(srid) {
             snr: Signal-to-noise ratio in dB
             utc: UTC timestamp string "YYYY-MM-DD HH:MM:SS"
             source: 1=Radio (TCP), 2=Internet (commsrvr)
+            raw_line: Data line as received — the raw commsrvr line verbatim
+                (date/time/freq/0/snr/callsign: message, minus only the leading
+                "ID:" prefix) for Internet traffic, or an equivalent line built
+                from JS8Call params for Radio (TCP) traffic — forwarded to the
+                MESSAGE parser so a direct message can echo it back to the
+                server as a delivery confirmation.
 
         Returns:
             (message_type, data_dict) where:
@@ -10760,7 +10922,7 @@ window.commstatBouncePin = function(srid) {
 
         # PRIORITY 7: MESSAGE
         result = self._parse_message(
-            rig_name, message_value, from_callsign, target, freq, snr, utc, source, global_id
+            rig_name, message_value, from_callsign, target, freq, snr, utc, source, global_id, raw_line
         )
         if result[0]:
             return result
@@ -10805,6 +10967,12 @@ window.commstatBouncePin = function(srid) {
         Returns:
             "statrep", "message", "alert", "video", or empty string
         """
+        # Build an equivalent of the commsrvr raw line — date time, freq_hz,
+        # unused/0, snr, "callsign: message" — from the as-received JS8Call
+        # params, before preprocessing touches value. Only used downstream if
+        # this turns out to be a direct message to one of our own callsigns.
+        raw_line = f"{utc}\t{freq}\t0\t{snr}\t{from_call}: {value}"
+
         # Preprocess message value
         value = self._preprocess_message_value(value, from_call)
 
@@ -10854,7 +11022,7 @@ window.commstatBouncePin = function(srid) {
 
         # Parse using unified parser (source=1 for Radio)
         msg_type, _ = self._parse_commstat_message(
-            rig_name, from_callsign, value, target, grid, freq, snr, utc, source=1
+            rig_name, from_callsign, value, target, grid, freq, snr, utc, source=1, raw_line=raw_line
         )
 
         return msg_type
